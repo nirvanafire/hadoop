@@ -24,6 +24,7 @@ import org.junit.Test;
 import org.junit.Before;
 import org.junit.After;
 
+import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_IMAGE_PARALLEL_LOAD_KEY;
 import static org.junit.Assert.*;
 
 import org.slf4j.Logger;
@@ -33,16 +34,19 @@ import org.apache.hadoop.conf.ReconfigurationException;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hdfs.MiniDFSCluster;
 import org.apache.hadoop.hdfs.protocol.HdfsConstants.StoragePolicySatisfierMode;
+import org.apache.hadoop.hdfs.protocol.BlockType;
 import org.apache.hadoop.hdfs.DFSConfigKeys;
 import org.apache.hadoop.hdfs.DistributedFileSystem;
 import org.apache.hadoop.hdfs.HdfsConfiguration;
 import org.apache.hadoop.hdfs.server.blockmanagement.DatanodeManager;
+import org.apache.hadoop.hdfs.server.blockmanagement.BlockManager;
 import org.apache.hadoop.hdfs.server.namenode.sps.StoragePolicySatisfyManager;
 import org.apache.hadoop.ipc.RemoteException;
 import org.apache.hadoop.test.GenericTestUtils;
 
 import static org.apache.hadoop.fs.CommonConfigurationKeysPublic.HADOOP_CALLER_CONTEXT_ENABLED_KEY;
 import static org.apache.hadoop.fs.CommonConfigurationKeysPublic.HADOOP_CALLER_CONTEXT_ENABLED_DEFAULT;
+import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_DATANODE_PEER_STATS_ENABLED_KEY;
 import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_HEARTBEAT_INTERVAL_KEY;
 import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_HEARTBEAT_INTERVAL_DEFAULT;
 import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_HEARTBEAT_RECHECK_INTERVAL_KEY;
@@ -50,6 +54,9 @@ import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_HEARTBEAT_RECHEC
 import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_STORAGE_POLICY_SATISFIER_MODE_KEY;
 import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_STORAGE_POLICY_SATISFIER_MODE_DEFAULT;
 import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_BLOCK_INVALIDATE_LIMIT_KEY;
+import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_AVOID_SLOW_DATANODE_FOR_READ_KEY;
+import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_BLOCKPLACEMENTPOLICY_EXCLUDE_SLOW_NODES_ENABLED_KEY;
+import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_MAX_SLOWPEER_COLLECT_NODES_KEY;
 import static org.apache.hadoop.fs.CommonConfigurationKeys.IPC_BACKOFF_ENABLE_DEFAULT;
 
 public class TestNameNodeReconfigure {
@@ -301,6 +308,8 @@ public class TestNameNodeReconfigure {
         StoragePolicySatisfierMode.EXTERNAL.toString(),
         nameNode.getConf().get(DFS_STORAGE_POLICY_SATISFIER_MODE_KEY,
             DFS_STORAGE_POLICY_SATISFIER_MODE_DEFAULT));
+    assertNotNull("SPS Manager should be created",
+        nameNode.getNamesystem().getBlockManager().getSPSManager());
   }
 
   /**
@@ -316,6 +325,8 @@ public class TestNameNodeReconfigure {
         StoragePolicySatisfierMode.NONE.toString());
     verifySPSEnabled(nameNode, DFS_STORAGE_POLICY_SATISFIER_MODE_KEY,
         StoragePolicySatisfierMode.NONE, false);
+    assertNull("SPS Manager should be null",
+        nameNode.getNamesystem().getBlockManager().getSPSManager());
 
     Path filePath = new Path("/testSPS");
     DistributedFileSystem fileSystem = cluster.getFileSystem();
@@ -339,7 +350,7 @@ public class TestNameNodeReconfigure {
             .getNamesystem().getBlockManager().getSPSManager();
     boolean isSPSRunning = spsMgr != null ? spsMgr.isSatisfierRunning()
         : false;
-    assertEquals(property + " has wrong value", isSPSRunning, isSPSRunning);
+    assertEquals(property + " has wrong value", isSatisfierRunning, isSPSRunning);
     String actual = nameNode.getConf().get(property,
         DFS_STORAGE_POLICY_SATISFIER_MODE_DEFAULT);
     assertEquals(property + " has wrong value", expected,
@@ -376,6 +387,130 @@ public class TestNameNodeReconfigure {
             + " is not reconfigured correctly",
         1000,
         datanodeManager.getBlockInvalidateLimit());
+  }
+
+  @Test
+  public void testEnableParallelLoadAfterReconfigured()
+      throws ReconfigurationException {
+    final NameNode nameNode = cluster.getNameNode();
+
+    // By default, enableParallelLoad is false
+    assertEquals(false, FSImageFormatProtobuf.getEnableParallelLoad());
+
+    nameNode.reconfigureProperty(DFS_IMAGE_PARALLEL_LOAD_KEY,
+        Boolean.toString(true));
+
+    // After reconfigured, enableParallelLoad is true
+    assertEquals(true, FSImageFormatProtobuf.getEnableParallelLoad());
+  }
+
+  @Test
+  public void testEnableSlowNodesParametersAfterReconfigured()
+      throws ReconfigurationException {
+    final NameNode nameNode = cluster.getNameNode();
+    final BlockManager blockManager = nameNode.namesystem.getBlockManager();
+    final DatanodeManager datanodeManager = blockManager.getDatanodeManager();
+
+    // By default, avoidSlowDataNodesForRead is false.
+    assertEquals(false, datanodeManager.getEnableAvoidSlowDataNodesForRead());
+
+    nameNode.reconfigureProperty(
+        DFS_NAMENODE_AVOID_SLOW_DATANODE_FOR_READ_KEY, Boolean.toString(true));
+
+    // After reconfigured, avoidSlowDataNodesForRead is true.
+    assertEquals(true, datanodeManager.getEnableAvoidSlowDataNodesForRead());
+
+    // By default, excludeSlowNodesEnabled is false.
+    assertEquals(false, blockManager.
+        getExcludeSlowNodesEnabled(BlockType.CONTIGUOUS));
+    assertEquals(false, blockManager.
+        getExcludeSlowNodesEnabled(BlockType.STRIPED));
+
+    nameNode.reconfigureProperty(
+        DFS_NAMENODE_BLOCKPLACEMENTPOLICY_EXCLUDE_SLOW_NODES_ENABLED_KEY, Boolean.toString(true));
+
+    // After reconfigured, excludeSlowNodesEnabled is true.
+    assertEquals(true, blockManager.
+        getExcludeSlowNodesEnabled(BlockType.CONTIGUOUS));
+    assertEquals(true, blockManager.
+        getExcludeSlowNodesEnabled(BlockType.STRIPED));
+  }
+
+  @Test
+  public void testReconfigureMaxSlowpeerCollectNodes()
+      throws ReconfigurationException {
+    final NameNode nameNode = cluster.getNameNode();
+    final DatanodeManager datanodeManager = nameNode.namesystem
+        .getBlockManager().getDatanodeManager();
+
+    // By default, DFS_NAMENODE_MAX_SLOWPEER_COLLECT_NODES_KEY is 5.
+    assertEquals(5, datanodeManager.getMaxSlowpeerCollectNodes());
+
+    // Reconfigure.
+    nameNode.reconfigureProperty(
+        DFS_NAMENODE_MAX_SLOWPEER_COLLECT_NODES_KEY, Integer.toString(10));
+
+    // Assert DFS_NAMENODE_MAX_SLOWPEER_COLLECT_NODES_KEY is 10.
+    assertEquals(10, datanodeManager.getMaxSlowpeerCollectNodes());
+  }
+
+  @Test
+  public void testBlockInvalidateLimit() throws ReconfigurationException {
+    final NameNode nameNode = cluster.getNameNode();
+    final DatanodeManager datanodeManager = nameNode.namesystem
+        .getBlockManager().getDatanodeManager();
+
+    assertEquals(DFS_BLOCK_INVALIDATE_LIMIT_KEY + " is not correctly set",
+        customizedBlockInvalidateLimit, datanodeManager.getBlockInvalidateLimit());
+
+    try {
+      nameNode.reconfigureProperty(DFS_BLOCK_INVALIDATE_LIMIT_KEY, "non-numeric");
+      fail("Should not reach here");
+    } catch (ReconfigurationException e) {
+      assertEquals(
+          "Could not change property dfs.block.invalidate.limit from '500' to 'non-numeric'",
+          e.getMessage());
+    }
+
+    nameNode.reconfigureProperty(DFS_BLOCK_INVALIDATE_LIMIT_KEY, "2500");
+
+    assertEquals(DFS_BLOCK_INVALIDATE_LIMIT_KEY + " is not honored after reconfiguration", 2500,
+        datanodeManager.getBlockInvalidateLimit());
+
+    nameNode.reconfigureProperty(DFS_HEARTBEAT_INTERVAL_KEY, "500");
+
+    // 20 * 500 (10000) > 2500
+    // Hence, invalid block limit should be reset to 10000
+    assertEquals(DFS_BLOCK_INVALIDATE_LIMIT_KEY + " is not reconfigured correctly", 10000,
+        datanodeManager.getBlockInvalidateLimit());
+  }
+
+  @Test
+  public void testSlowPeerTrackerEnabled() throws Exception {
+    final NameNode nameNode = cluster.getNameNode();
+    final DatanodeManager datanodeManager = nameNode.namesystem.getBlockManager()
+        .getDatanodeManager();
+
+    assertFalse("SlowNode tracker is already enabled. It should be disabled by default",
+        datanodeManager.getSlowPeerTracker().isSlowPeerTrackerEnabled());
+
+    try {
+      nameNode.reconfigurePropertyImpl(DFS_DATANODE_PEER_STATS_ENABLED_KEY, "non-boolean");
+      fail("should not reach here");
+    } catch (ReconfigurationException e) {
+      assertEquals(
+          "Could not change property dfs.datanode.peer.stats.enabled from 'false' to 'non-boolean'",
+          e.getMessage());
+    }
+
+    nameNode.reconfigurePropertyImpl(DFS_DATANODE_PEER_STATS_ENABLED_KEY, "True");
+    assertTrue("SlowNode tracker is still disabled. Reconfiguration could not be successful",
+        datanodeManager.getSlowPeerTracker().isSlowPeerTrackerEnabled());
+
+    nameNode.reconfigurePropertyImpl(DFS_DATANODE_PEER_STATS_ENABLED_KEY, null);
+    assertFalse("SlowNode tracker is still enabled. Reconfiguration could not be successful",
+        datanodeManager.getSlowPeerTracker().isSlowPeerTrackerEnabled());
+
   }
 
   @After

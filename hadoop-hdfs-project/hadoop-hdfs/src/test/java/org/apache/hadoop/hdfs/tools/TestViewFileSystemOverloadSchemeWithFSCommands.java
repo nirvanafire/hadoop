@@ -40,13 +40,13 @@ import org.apache.hadoop.fs.viewfs.ViewFsTestSetup;
 import org.apache.hadoop.hdfs.DistributedFileSystem;
 import org.apache.hadoop.hdfs.MiniDFSCluster;
 import org.apache.hadoop.test.PathUtils;
+import org.apache.hadoop.util.Lists;
 import org.apache.hadoop.util.ToolRunner;
+
 import org.junit.After;
 import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Test;
-
-import com.google.common.collect.Lists;
 
 /**
  * Tests HDFS commands with ViewFileSystemOverloadScheme with configured mount
@@ -142,7 +142,7 @@ public class TestViewFileSystemOverloadSchemeWithFSCommands {
     List<String> mounts = Lists.newArrayList();
     mounts.add(HDFS_USER_FOLDER);
     mounts.add(LOCAL_FOLDER);
-    addMountLinks(defaultFSURI.getAuthority(),
+    addMountLinks(defaultFSURI.getHost(),
         mounts.toArray(new String[mounts.size()]),
         new String[] {hdfsTargetPath.toUri().toString(),
             localTargetDir.toURI().toString() },

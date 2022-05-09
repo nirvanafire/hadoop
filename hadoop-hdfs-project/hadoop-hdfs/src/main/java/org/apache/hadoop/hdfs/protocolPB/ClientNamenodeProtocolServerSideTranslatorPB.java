@@ -66,6 +66,7 @@ import org.apache.hadoop.hdfs.protocol.RollingUpgradeInfo;
 import org.apache.hadoop.hdfs.protocol.SnapshotDiffReport;
 import org.apache.hadoop.hdfs.protocol.SnapshotDiffReportListing;
 import org.apache.hadoop.hdfs.protocol.SnapshottableDirectoryStatus;
+import org.apache.hadoop.hdfs.protocol.SnapshotStatus;
 import org.apache.hadoop.hdfs.protocol.ZoneReencryptionStatus;
 import org.apache.hadoop.hdfs.protocol.proto.AclProtos.GetAclStatusRequestProto;
 import org.apache.hadoop.hdfs.protocol.proto.AclProtos.GetAclStatusResponseProto;
@@ -155,12 +156,16 @@ import org.apache.hadoop.hdfs.protocol.proto.ClientNamenodeProtocolProtos.GetQuo
 import org.apache.hadoop.hdfs.protocol.proto.ClientNamenodeProtocolProtos.GetQuotaUsageResponseProto;
 import org.apache.hadoop.hdfs.protocol.proto.ClientNamenodeProtocolProtos.GetServerDefaultsRequestProto;
 import org.apache.hadoop.hdfs.protocol.proto.ClientNamenodeProtocolProtos.GetServerDefaultsResponseProto;
+import org.apache.hadoop.hdfs.protocol.proto.ClientNamenodeProtocolProtos.GetSlowDatanodeReportRequestProto;
+import org.apache.hadoop.hdfs.protocol.proto.ClientNamenodeProtocolProtos.GetSlowDatanodeReportResponseProto;
 import org.apache.hadoop.hdfs.protocol.proto.ClientNamenodeProtocolProtos.GetSnapshotDiffReportRequestProto;
 import org.apache.hadoop.hdfs.protocol.proto.ClientNamenodeProtocolProtos.GetSnapshotDiffReportResponseProto;
 import org.apache.hadoop.hdfs.protocol.proto.ClientNamenodeProtocolProtos.GetSnapshotDiffReportListingRequestProto;
 import org.apache.hadoop.hdfs.protocol.proto.ClientNamenodeProtocolProtos.GetSnapshotDiffReportListingResponseProto;
 import org.apache.hadoop.hdfs.protocol.proto.ClientNamenodeProtocolProtos.GetSnapshottableDirListingRequestProto;
 import org.apache.hadoop.hdfs.protocol.proto.ClientNamenodeProtocolProtos.GetSnapshottableDirListingResponseProto;
+import org.apache.hadoop.hdfs.protocol.proto.ClientNamenodeProtocolProtos.GetSnapshotListingRequestProto;
+import org.apache.hadoop.hdfs.protocol.proto.ClientNamenodeProtocolProtos.GetSnapshotListingResponseProto;
 import org.apache.hadoop.hdfs.protocol.proto.ClientNamenodeProtocolProtos.GetStoragePoliciesRequestProto;
 import org.apache.hadoop.hdfs.protocol.proto.ClientNamenodeProtocolProtos.GetStoragePoliciesResponseProto;
 import org.apache.hadoop.hdfs.protocol.proto.ClientNamenodeProtocolProtos.GetStoragePolicyRequestProto;
@@ -325,6 +330,9 @@ public class ClientNamenodeProtocolServerSideTranslatorPB implements
   static final GetSnapshottableDirListingResponseProto 
       NULL_GET_SNAPSHOTTABLE_DIR_LISTING_RESPONSE = 
       GetSnapshottableDirListingResponseProto.newBuilder().build();
+  static final GetSnapshotListingResponseProto
+      NULL_GET_SNAPSHOT_LISTING_RESPONSE =
+      GetSnapshotListingResponseProto.newBuilder().build();
   static final SetStoragePolicyResponseProto VOID_SET_STORAGE_POLICY_RESPONSE =
       SetStoragePolicyResponseProto.newBuilder().build();
   static final UnsetStoragePolicyResponseProto
@@ -1350,6 +1358,24 @@ public class ClientNamenodeProtocolServerSideTranslatorPB implements
   }
 
   @Override
+  public GetSnapshotListingResponseProto getSnapshotListing(
+      RpcController controller, GetSnapshotListingRequestProto request)
+      throws ServiceException {
+    try {
+      SnapshotStatus[] result = server
+          .getSnapshotListing(request.getSnapshotRoot());
+      if (result != null) {
+        return GetSnapshotListingResponseProto.newBuilder().
+            setSnapshotList(PBHelperClient.convert(result)).build();
+      } else {
+        return NULL_GET_SNAPSHOT_LISTING_RESPONSE;
+      }
+    } catch (IOException e) {
+      throw new ServiceException(e);
+    }
+  }
+
+  @Override
   public GetSnapshotDiffReportResponseProto getSnapshotDiffReport(
       RpcController controller, GetSnapshotDiffReportRequestProto request)
       throws ServiceException {
@@ -2030,6 +2056,20 @@ public class ClientNamenodeProtocolServerSideTranslatorPB implements
           HAServiceStateResponseProto.newBuilder();
       builder.setState(retState);
       return builder.build();
+    } catch (IOException e) {
+      throw new ServiceException(e);
+    }
+  }
+
+  @Override
+  public GetSlowDatanodeReportResponseProto getSlowDatanodeReport(RpcController controller,
+      GetSlowDatanodeReportRequestProto request) throws ServiceException {
+    try {
+      List<? extends DatanodeInfoProto> result =
+          PBHelperClient.convert(server.getSlowDatanodeReport());
+      return GetSlowDatanodeReportResponseProto.newBuilder()
+          .addAllDatanodeInfoProto(result)
+          .build();
     } catch (IOException e) {
       throw new ServiceException(e);
     }

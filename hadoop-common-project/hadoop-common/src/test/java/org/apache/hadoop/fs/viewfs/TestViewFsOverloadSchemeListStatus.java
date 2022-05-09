@@ -46,9 +46,17 @@ public class TestViewFsOverloadSchemeListStatus {
 
   private static final File TEST_DIR =
       GenericTestUtils.getTestDir(TestViewfsFileStatus.class.getSimpleName());
+  private Configuration conf;
+  private static final String FILE_NAME = "file";
 
   @Before
   public void setUp() {
+    conf = new Configuration();
+    conf.set(String.format("fs.%s.impl", FILE_NAME),
+        ViewFileSystemOverloadScheme.class.getName());
+    conf.set(String
+        .format(FsConstants.FS_VIEWFS_OVERLOAD_SCHEME_TARGET_FS_IMPL_PATTERN,
+            FILE_NAME), LocalFileSystem.class.getName());
     FileUtil.fullyDelete(TEST_DIR);
     assertTrue(TEST_DIR.mkdirs());
   }
@@ -77,15 +85,9 @@ public class TestViewFsOverloadSchemeListStatus {
     File childDir = new File(TEST_DIR, childDirectoryName);
     childDir.mkdirs();
 
-    Configuration conf = new Configuration();
     ConfigUtil.addLink(conf, "/file", infile.toURI());
     ConfigUtil.addLink(conf, "/dir", childDir.toURI());
-    String fileScheme = "file";
-    conf.set(String.format("fs.%s.impl", fileScheme),
-        ViewFileSystemOverloadScheme.class.getName());
-    conf.set(String
-        .format(FsConstants.FS_VIEWFS_OVERLOAD_SCHEME_TARGET_FS_IMPL_PATTERN,
-            fileScheme), LocalFileSystem.class.getName());
+
     String fileUriStr = "file:///";
     try (FileSystem vfs = FileSystem.get(new URI(fileUriStr), conf)) {
       assertEquals(ViewFileSystemOverloadScheme.class, vfs.getClass());
@@ -95,9 +97,8 @@ public class TestViewFsOverloadSchemeListStatus {
           .getRawFileSystem(new Path(fileUriStr), conf);
       FileStatus fileStat = localFs.getFileStatus(new Path(infile.getPath()));
       FileStatus dirStat = localFs.getFileStatus(new Path(childDir.getPath()));
-
       for (FileStatus status : statuses) {
-        if (status.getPath().getName().equals(fileScheme)) {
+        if (status.getPath().getName().equals(FILE_NAME)) {
           assertEquals(fileStat.getPermission(), status.getPermission());
         } else {
           assertEquals(dirStat.getPermission(), status.getPermission());
@@ -111,7 +112,7 @@ public class TestViewFsOverloadSchemeListStatus {
 
       statuses = vfs.listStatus(new Path("/"));
       for (FileStatus status : statuses) {
-        if (status.getPath().getName().equals(fileScheme)) {
+        if (status.getPath().getName().equals(FILE_NAME)) {
           assertEquals(FsPermission.valueOf("-rwxr--r--"),
               status.getPermission());
           assertFalse(status.isDirectory());
@@ -121,6 +122,35 @@ public class TestViewFsOverloadSchemeListStatus {
           assertTrue(status.isDirectory());
         }
       }
+    }
+  }
+
+  /**
+   * Tests that ViewFSOverloadScheme should consider initialized fs as fallback
+   * if there are no mount links configured. It should add fallback with the
+   * chrootedFS at it's uri's root.
+   */
+  @Test(timeout = 30000)
+  public void testViewFSOverloadSchemeWithoutAnyMountLinks() throws Exception {
+    Path initUri = new Path(TEST_DIR.toURI().toString(), "init");
+    try (FileSystem fs = FileSystem.get(initUri.toUri(), conf)) {
+      ViewFileSystemOverloadScheme vfs = (ViewFileSystemOverloadScheme) fs;
+      assertEquals(0, vfs.getMountPoints().length);
+      Path testOnFallbackPath = new Path(TEST_DIR.toURI().toString(), "test");
+      assertTrue(vfs.mkdirs(testOnFallbackPath));
+      FileStatus[] status = vfs.listStatus(testOnFallbackPath.getParent());
+      assertEquals(Path.getPathWithoutSchemeAndAuthority(testOnFallbackPath),
+          Path.getPathWithoutSchemeAndAuthority(status[0].getPath()));
+      //Check directly on localFS. The fallBackFs(localFS) should be chrooted
+      //at it's root. So, after
+      FileSystem lfs = vfs.getRawFileSystem(testOnFallbackPath, conf);
+      FileStatus[] statusOnLocalFS =
+          lfs.listStatus(testOnFallbackPath.getParent());
+      assertEquals(testOnFallbackPath.getName(),
+          statusOnLocalFS[0].getPath().getName());
+      //initUri should not have exist in lfs, as it would have chrooted on it's
+      // root only.
+      assertFalse(lfs.exists(initUri));
     }
   }
 

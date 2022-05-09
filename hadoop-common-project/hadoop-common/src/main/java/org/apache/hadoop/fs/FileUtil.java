@@ -36,13 +36,18 @@ import java.nio.charset.Charset;
 import java.nio.charset.CharsetEncoder;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.AccessDeniedException;
+import java.nio.file.attribute.PosixFilePermission;
 import java.nio.file.FileSystems;
 import java.nio.file.Files;
+import java.nio.file.LinkOption;
+import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.Enumeration;
+import java.util.EnumSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -51,13 +56,14 @@ import java.util.jar.Attributes;
 import java.util.jar.JarOutputStream;
 import java.util.jar.Manifest;
 import java.util.zip.GZIPInputStream;
-import java.util.zip.ZipEntry;
-import java.util.zip.ZipFile;
-import java.util.zip.ZipInputStream;
 
 import org.apache.commons.collections.map.CaseInsensitiveMap;
 import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
 import org.apache.commons.compress.archivers.tar.TarArchiveInputStream;
+import org.apache.commons.compress.archivers.zip.ZipArchiveEntry;
+import org.apache.commons.compress.archivers.zip.ZipArchiveInputStream;
+import org.apache.commons.compress.archivers.zip.ZipFile;
+import org.apache.commons.io.FileUtils;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
 import org.apache.hadoop.conf.Configuration;
@@ -70,6 +76,11 @@ import org.apache.hadoop.util.Shell.ShellCommandExecutor;
 import org.apache.hadoop.util.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import static org.apache.hadoop.fs.Options.OpenFileOptions.FS_OPTION_OPENFILE_READ_POLICY;
+import static org.apache.hadoop.fs.Options.OpenFileOptions.FS_OPTION_OPENFILE_LENGTH;
+import static org.apache.hadoop.fs.Options.OpenFileOptions.FS_OPTION_OPENFILE_READ_POLICY_WHOLE_FILE;
+import static org.apache.hadoop.util.functional.FutureIO.awaitFuture;
 
 /**
  * A collection of file-processing util methods
@@ -182,7 +193,7 @@ public class FileUtil {
       return true;
     }
     // handle nonempty directory deletion
-    if (!fullyDeleteContents(dir, tryGrantPermissions)) {
+    if (!FileUtils.isSymlink(dir) && !fullyDeleteContents(dir, tryGrantPermissions)) {
       return false;
     }
     return deleteImpl(dir, true);
@@ -390,7 +401,32 @@ public class FileUtil {
     return copy(srcFS, fileStatus, dstFS, dst, deleteSource, overwrite, conf);
   }
 
-  /** Copy files between FileSystems. */
+  /**
+   * Copy a file/directory tree within/between filesystems.
+   * <p></p>
+   * returns true if the operation succeeded. When deleteSource is true,
+   * this means "after the copy, delete(source) returned true"
+   * If the destination is a directory, and mkdirs (dest) fails,
+   * the operation will return false rather than raise any exception.
+   * <p></p>
+   * The overwrite flag is about overwriting files; it has no effect about
+   * handing an attempt to copy a file atop a directory (expect an IOException),
+   * or a directory over a path which contains a file (mkdir will fail, so
+   * "false").
+   * <p></p>
+   * The operation is recursive, and the deleteSource operation takes place
+   * as each subdirectory is copied. Therefore, if an operation fails partway
+   * through, the source tree may be partially deleted.
+   * @param srcFS source filesystem
+   * @param srcStatus status of source
+   * @param dstFS destination filesystem
+   * @param dst path of source
+   * @param deleteSource delete the source?
+   * @param overwrite overwrite files at destination?
+   * @param conf configuration to use when opening files
+   * @return true if the operation succeeded.
+   * @throws IOException failure
+   */
   public static boolean copy(FileSystem srcFS, FileStatus srcStatus,
                              FileSystem dstFS, Path dst,
                              boolean deleteSource,
@@ -403,22 +439,27 @@ public class FileUtil {
       if (!dstFS.mkdirs(dst)) {
         return false;
       }
-      FileStatus contents[] = srcFS.listStatus(src);
-      for (int i = 0; i < contents.length; i++) {
-        copy(srcFS, contents[i], dstFS,
-             new Path(dst, contents[i].getPath().getName()),
-             deleteSource, overwrite, conf);
+      RemoteIterator<FileStatus> contents = srcFS.listStatusIterator(src);
+      while (contents.hasNext()) {
+        FileStatus next = contents.next();
+        copy(srcFS, next, dstFS,
+            new Path(dst, next.getPath().getName()),
+            deleteSource, overwrite, conf);
       }
     } else {
-      InputStream in=null;
+      InputStream in = null;
       OutputStream out = null;
       try {
-        in = srcFS.open(src);
+        in = awaitFuture(srcFS.openFile(src)
+            .opt(FS_OPTION_OPENFILE_READ_POLICY,
+                FS_OPTION_OPENFILE_READ_POLICY_WHOLE_FILE)
+            .opt(FS_OPTION_OPENFILE_LENGTH,
+                srcStatus.getLen())   // file length hint for object stores
+            .build());
         out = dstFS.create(dst, overwrite);
         IOUtils.copyBytes(in, out, conf, true);
       } catch (IOException e) {
-        IOUtils.closeStream(out);
-        IOUtils.closeStream(in);
+        IOUtils.cleanupWithLogger(LOG, in, out);
         throw e;
       }
     }
@@ -497,7 +538,11 @@ public class FileUtil {
              deleteSource, conf);
       }
     } else {
-      InputStream in = srcFS.open(src);
+      InputStream in = awaitFuture(srcFS.openFile(src)
+          .withFileStatus(srcStatus)
+          .opt(FS_OPTION_OPENFILE_READ_POLICY,
+              FS_OPTION_OPENFILE_READ_POLICY_WHOLE_FILE)
+          .build());
       IOUtils.copyBytes(in, Files.newOutputStream(dst.toPath()), conf);
     }
     if (deleteSource) {
@@ -518,6 +563,9 @@ public class FileUtil {
     if (null != sdst) {
       if (sdst.isDirectory()) {
         if (null == srcName) {
+          if (overwrite) {
+            return dst;
+          }
           throw new PathIsDirectoryException(dst.toString());
         }
         return checkDest(null, dstFS, new Path(dst, srcName), overwrite);
@@ -527,6 +575,26 @@ public class FileUtil {
       }
     }
     return dst;
+  }
+
+  public static boolean isRegularFile(File file) {
+    return isRegularFile(file, true);
+  }
+
+  /**
+   * Check if the file is regular.
+   * @param file The file being checked.
+   * @param allowLinks Whether to allow matching links.
+   * @return Returns the result of checking whether the file is a regular file.
+   */
+  public static boolean isRegularFile(File file, boolean allowLinks) {
+    if (file != null) {
+      if (allowLinks) {
+        return Files.isRegularFile(file.toPath());
+      }
+      return Files.isRegularFile(file.toPath(), LinkOption.NOFOLLOW_LINKS);
+    }
+    return true;
   }
 
   /**
@@ -598,18 +666,12 @@ public class FileUtil {
       return dir.length();
     } else {
       File[] allFiles = dir.listFiles();
-      if(allFiles != null) {
-         for (int i = 0; i < allFiles.length; i++) {
-           boolean isSymLink;
-           try {
-             isSymLink = org.apache.commons.io.FileUtils.isSymlink(allFiles[i]);
-           } catch(IOException ioe) {
-             isSymLink = true;
-           }
-           if(!isSymLink) {
-             size += getDU(allFiles[i]);
-           }
-         }
+      if (allFiles != null) {
+        for (File f : allFiles) {
+          if (!org.apache.commons.io.FileUtils.isSymlink(f)) {
+            size += getDU(f);
+          }
+        }
       }
       return size;
     }
@@ -624,12 +686,12 @@ public class FileUtil {
    */
   public static void unZip(InputStream inputStream, File toDir)
       throws IOException {
-    try (ZipInputStream zip = new ZipInputStream(inputStream)) {
+    try (ZipArchiveInputStream zip = new ZipArchiveInputStream(inputStream)) {
       int numOfFailedLastModifiedSet = 0;
       String targetDirPath = toDir.getCanonicalPath() + File.separator;
-      for(ZipEntry entry = zip.getNextEntry();
+      for(ZipArchiveEntry entry = zip.getNextZipEntry();
           entry != null;
-          entry = zip.getNextEntry()) {
+          entry = zip.getNextZipEntry()) {
         if (!entry.isDirectory()) {
           File file = new File(toDir, entry.getName());
           if (!file.getCanonicalPath().startsWith(targetDirPath)) {
@@ -648,12 +710,58 @@ public class FileUtil {
           if (!file.setLastModified(entry.getTime())) {
             numOfFailedLastModifiedSet++;
           }
+          if (entry.getPlatform() == ZipArchiveEntry.PLATFORM_UNIX) {
+            Files.setPosixFilePermissions(file.toPath(), permissionsFromMode(entry.getUnixMode()));
+          }
         }
       }
       if (numOfFailedLastModifiedSet > 0) {
         LOG.warn("Could not set last modfied time for {} file(s)",
             numOfFailedLastModifiedSet);
       }
+    }
+  }
+
+  /**
+   * The permission operation of this method only involves users, user groups, and others.
+   * If SUID is set, only executable permissions are reserved.
+   * @param mode Permissions are represented by numerical values
+   * @return The original permissions for files are stored in collections
+   */
+  private static Set<PosixFilePermission> permissionsFromMode(int mode) {
+    EnumSet<PosixFilePermission> permissions =
+        EnumSet.noneOf(PosixFilePermission.class);
+    addPermissions(permissions, mode, PosixFilePermission.OTHERS_READ,
+        PosixFilePermission.OTHERS_WRITE, PosixFilePermission.OTHERS_EXECUTE);
+    addPermissions(permissions, mode >> 3, PosixFilePermission.GROUP_READ,
+        PosixFilePermission.GROUP_WRITE, PosixFilePermission.GROUP_EXECUTE);
+    addPermissions(permissions, mode >> 6, PosixFilePermission.OWNER_READ,
+        PosixFilePermission.OWNER_WRITE, PosixFilePermission.OWNER_EXECUTE);
+    return permissions;
+  }
+
+  /**
+   * Assign the original permissions to the file
+   * @param permissions The original permissions for files are stored in collections
+   * @param mode Use a value of type int to indicate permissions
+   * @param r Read permission
+   * @param w Write permission
+   * @param x Execute permission
+   */
+  private static void addPermissions(
+      Set<PosixFilePermission> permissions,
+      int mode,
+      PosixFilePermission r,
+      PosixFilePermission w,
+      PosixFilePermission x) {
+    if ((mode & 1L) == 1L) {
+      permissions.add(x);
+    }
+    if ((mode & 2L) == 2L) {
+      permissions.add(w);
+    }
+    if ((mode & 4L) == 4L) {
+      permissions.add(r);
     }
   }
 
@@ -665,14 +773,14 @@ public class FileUtil {
    * @throws IOException An I/O exception has occurred
    */
   public static void unZip(File inFile, File unzipDir) throws IOException {
-    Enumeration<? extends ZipEntry> entries;
+    Enumeration<? extends ZipArchiveEntry> entries;
     ZipFile zipFile = new ZipFile(inFile);
 
     try {
-      entries = zipFile.entries();
+      entries = zipFile.getEntries();
       String targetDirPath = unzipDir.getCanonicalPath() + File.separator;
       while (entries.hasMoreElements()) {
-        ZipEntry entry = entries.nextElement();
+        ZipArchiveEntry entry = entries.nextElement();
         if (!entry.isDirectory()) {
           InputStream in = zipFile.getInputStream(entry);
           try {
@@ -696,6 +804,9 @@ public class FileUtil {
               }
             } finally {
               out.close();
+            }
+            if (entry.getPlatform() == ZipArchiveEntry.PLATFORM_UNIX) {
+              Files.setPosixFilePermissions(file.toPath(), permissionsFromMode(entry.getUnixMode()));
             }
           } finally {
             in.close();
@@ -890,10 +1001,13 @@ public class FileUtil {
   private static void unTarUsingTar(File inFile, File untarDir,
       boolean gzipped) throws IOException {
     StringBuffer untarCommand = new StringBuffer();
+    // not using canonical path here; this postpones relative path
+    // resolution until bash is executed.
+    final String source = "'" + FileUtil.makeSecureShellPath(inFile) + "'";
     if (gzipped) {
-      untarCommand.append(" gzip -dc '")
-          .append(FileUtil.makeSecureShellPath(inFile))
-          .append("' | (");
+      untarCommand.append(" gzip -dc ")
+          .append(source)
+          .append(" | (");
     }
     untarCommand.append("cd '")
         .append(FileUtil.makeSecureShellPath(untarDir))
@@ -903,15 +1017,17 @@ public class FileUtil {
     if (gzipped) {
       untarCommand.append(" -)");
     } else {
-      untarCommand.append(FileUtil.makeSecureShellPath(inFile));
+      untarCommand.append(source);
     }
+    LOG.debug("executing [{}]", untarCommand);
     String[] shellCmd = { "bash", "-c", untarCommand.toString() };
     ShellCommandExecutor shexec = new ShellCommandExecutor(shellCmd);
     shexec.execute();
     int exitcode = shexec.getExitCode();
     if (exitcode != 0) {
       throw new IOException("Error untarring file " + inFile +
-                  ". Tar process exited with exit code " + exitcode);
+          ". Tar process exited with exit code " + exitcode
+          + " from command " + untarCommand);
     }
   }
 
@@ -968,6 +1084,14 @@ public class FileUtil {
           + " would create entry outside of " + outputDir);
     }
 
+    if (entry.isSymbolicLink() || entry.isLink()) {
+      String canonicalTargetPath = getCanonicalPath(entry.getLinkName(), outputDir);
+      if (!canonicalTargetPath.startsWith(targetDirPath)) {
+        throw new IOException(
+            "expanding " + entry.getName() + " would create entry outside of " + outputDir);
+      }
+    }
+
     if (entry.isDirectory()) {
       File subDir = new File(outputDir, entry.getName());
       if (!subDir.mkdirs() && !subDir.isDirectory()) {
@@ -983,10 +1107,12 @@ public class FileUtil {
     }
 
     if (entry.isSymbolicLink()) {
-      // Create symbolic link relative to tar parent dir
-      Files.createSymbolicLink(FileSystems.getDefault()
-              .getPath(outputDir.getPath(), entry.getName()),
-          FileSystems.getDefault().getPath(entry.getLinkName()));
+      // Create symlink with canonical target path to ensure that we don't extract
+      // outside targetDirPath
+      String canonicalTargetPath = getCanonicalPath(entry.getLinkName(), outputDir);
+      Files.createSymbolicLink(
+          FileSystems.getDefault().getPath(outputDir.getPath(), entry.getName()),
+          FileSystems.getDefault().getPath(canonicalTargetPath));
       return;
     }
 
@@ -998,12 +1124,27 @@ public class FileUtil {
     }
 
     if (entry.isLink()) {
-      File src = new File(outputDir, entry.getLinkName());
+      String canonicalTargetPath = getCanonicalPath(entry.getLinkName(), outputDir);
+      File src = new File(canonicalTargetPath);
       HardLink.createHardLink(src, outputFile);
       return;
     }
 
     org.apache.commons.io.FileUtils.copyToFile(tis, outputFile);
+  }
+
+  /**
+   * Gets the canonical path for the given path.
+   *
+   * @param path      The path for which the canonical path needs to be computed.
+   * @param parentDir The parent directory to use if the path is a relative path.
+   * @return The canonical path of the given path.
+   */
+  private static String getCanonicalPath(String path, File parentDir) throws IOException {
+    java.nio.file.Path targetPath = Paths.get(path);
+    return (targetPath.isAbsolute() ?
+        new File(path) :
+        new File(parentDir, path)).getCanonicalPath();
   }
 
   /**
@@ -1806,7 +1947,7 @@ public class FileUtil {
    * specified charset. This utility method opens the file for writing, creating
    * the file if it does not exist, or overwrites an existing file.
    *
-   * @param FileContext the file context with which to create the file
+   * @param fs the file context with which to create the file
    * @param path the path to the file
    * @param charseq the char sequence to write to the file
    * @param cs the charset to use for encoding
@@ -1868,5 +2009,21 @@ public class FileUtil {
   public static FileContext write(final FileContext fileContext,
       final Path path, final CharSequence charseq) throws IOException {
     return write(fileContext, path, charseq, StandardCharsets.UTF_8);
+  }
+
+  @InterfaceAudience.LimitedPrivate({"ViewDistributedFileSystem"})
+  @InterfaceStability.Unstable
+  /**
+   * Used in ViewDistributedFileSystem rename API to get access to the protected
+   * API of FileSystem interface. Even though Rename with options API
+   * deprecated, we are still using as part of trash. If any filesystem provided
+   * implementation to this protected FileSystem API, we can't invoke it with
+   * out casting to the specific filesystem. This util method is proposed to get
+   * the access to FileSystem#rename with options.
+   */
+  @SuppressWarnings("deprecation")
+  public static void rename(FileSystem srcFs, Path src, Path dst,
+      final Options.Rename... options) throws IOException {
+    srcFs.rename(src, dst, options);
   }
 }

@@ -17,6 +17,7 @@
  */
 package org.apache.hadoop.hdfs.server.federation.router;
 
+import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_REDUNDANCY_CONSIDERLOAD_KEY;
 import static org.apache.hadoop.hdfs.server.federation.FederationTestUtils.addDirectory;
 import static org.apache.hadoop.hdfs.server.federation.FederationTestUtils.countContents;
 import static org.apache.hadoop.hdfs.server.federation.FederationTestUtils.createFile;
@@ -25,6 +26,7 @@ import static org.apache.hadoop.hdfs.server.federation.FederationTestUtils.getFi
 import static org.apache.hadoop.hdfs.server.federation.FederationTestUtils.verifyFileExists;
 import static org.apache.hadoop.hdfs.server.federation.MiniRouterDFSCluster.TEST_STRING;
 import static org.apache.hadoop.test.GenericTestUtils.assertExceptionContains;
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
@@ -67,6 +69,8 @@ import org.apache.hadoop.hdfs.DFSClient;
 import org.apache.hadoop.hdfs.DFSConfigKeys;
 import org.apache.hadoop.hdfs.DFSTestUtil;
 import org.apache.hadoop.hdfs.DistributedFileSystem;
+import org.apache.hadoop.hdfs.MiniDFSCluster;
+import org.apache.hadoop.hdfs.MiniDFSCluster.DataNodeProperties;
 import org.apache.hadoop.hdfs.NameNodeProxies;
 import org.apache.hadoop.hdfs.client.HdfsDataOutputStream;
 import org.apache.hadoop.hdfs.protocol.AddErasureCodingPolicyResponse;
@@ -82,8 +86,6 @@ import org.apache.hadoop.hdfs.protocol.ErasureCodingPolicy;
 import org.apache.hadoop.hdfs.protocol.ErasureCodingPolicyInfo;
 import org.apache.hadoop.hdfs.protocol.ErasureCodingPolicyState;
 import org.apache.hadoop.hdfs.protocol.HdfsConstants;
-import org.apache.hadoop.hdfs.protocol.HdfsConstants.DatanodeReportType;
-import org.apache.hadoop.hdfs.protocol.HdfsConstants.SafeModeAction;
 import org.apache.hadoop.hdfs.protocol.HdfsFileStatus;
 import org.apache.hadoop.hdfs.protocol.LocatedBlock;
 import org.apache.hadoop.hdfs.protocol.LocatedBlocks;
@@ -92,9 +94,13 @@ import org.apache.hadoop.hdfs.protocol.SnapshotDiffReport;
 import org.apache.hadoop.hdfs.protocol.SnapshotDiffReportListing;
 import org.apache.hadoop.hdfs.protocol.SnapshotException;
 import org.apache.hadoop.hdfs.protocol.SnapshottableDirectoryStatus;
+import org.apache.hadoop.hdfs.protocol.SnapshotStatus;
+import org.apache.hadoop.hdfs.protocol.HdfsConstants.DatanodeReportType;
+import org.apache.hadoop.hdfs.protocol.HdfsConstants.SafeModeAction;
 import org.apache.hadoop.hdfs.security.token.block.ExportedBlockKeys;
 import org.apache.hadoop.hdfs.server.blockmanagement.BlockManager;
 import org.apache.hadoop.hdfs.server.blockmanagement.BlockManagerTestUtil;
+import org.apache.hadoop.hdfs.server.datanode.DataNode;
 import org.apache.hadoop.hdfs.server.federation.MiniRouterDFSCluster;
 import org.apache.hadoop.hdfs.server.federation.MiniRouterDFSCluster.NamenodeContext;
 import org.apache.hadoop.hdfs.server.federation.MiniRouterDFSCluster.RouterContext;
@@ -108,6 +114,7 @@ import org.apache.hadoop.hdfs.server.namenode.FSNamesystem;
 import org.apache.hadoop.hdfs.server.namenode.INodeDirectory;
 import org.apache.hadoop.hdfs.server.namenode.NameNode;
 import org.apache.hadoop.hdfs.server.namenode.NameNodeAdapter;
+import org.apache.hadoop.hdfs.server.namenode.snapshot.SnapshotTestHelper;
 import org.apache.hadoop.hdfs.server.protocol.BlocksWithLocations;
 import org.apache.hadoop.hdfs.server.protocol.BlocksWithLocations.BlockWithLocations;
 import org.apache.hadoop.hdfs.server.protocol.DatanodeStorageReport;
@@ -116,6 +123,7 @@ import org.apache.hadoop.hdfs.server.protocol.NamespaceInfo;
 import org.apache.hadoop.io.EnumSetWritable;
 import org.apache.hadoop.io.erasurecode.ECSchema;
 import org.apache.hadoop.io.erasurecode.ErasureCodeConstants;
+import org.apache.hadoop.ipc.CallerContext;
 import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.hadoop.service.Service.STATE;
 import org.apache.hadoop.test.GenericTestUtils;
@@ -128,8 +136,8 @@ import org.junit.Test;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import com.google.common.base.Supplier;
-import com.google.common.collect.Maps;
+import java.util.function.Supplier;
+import org.apache.hadoop.thirdparty.com.google.common.collect.Maps;
 
 /**
  * The the RPC interface of the {@link Router} implemented by
@@ -178,6 +186,7 @@ public class TestRouterRpc {
   private NamenodeProtocol routerNamenodeProtocol;
   /** NameNodeProtocol interface to the Namenode. */
   private NamenodeProtocol nnNamenodeProtocol;
+  private NamenodeProtocol nnNamenodeProtocol1;
 
   /** Filesystem interface to the Router. */
   private FileSystem routerFS;
@@ -192,8 +201,16 @@ public class TestRouterRpc {
 
   @BeforeClass
   public static void globalSetUp() throws Exception {
+    Configuration namenodeConf = new Configuration();
+    namenodeConf.setBoolean(DFSConfigKeys.HADOOP_CALLER_CONTEXT_ENABLED_KEY,
+        true);
+    // It's very easy to become overloaded for some specific dn in this small
+    // cluster, which will cause the EC file block allocation failure. To avoid
+    // this issue, we disable considerLoad option.
+    namenodeConf.setBoolean(DFS_NAMENODE_REDUNDANCY_CONSIDERLOAD_KEY, false);
     cluster = new MiniRouterDFSCluster(false, NUM_SUBCLUSTERS);
     cluster.setNumDatanodesPerNameservice(NUM_DNS);
+    cluster.addNamenodeOverrides(namenodeConf);
     cluster.setIndependentDNs();
 
     Configuration conf = new Configuration();
@@ -216,6 +233,16 @@ public class TestRouterRpc {
     // Register and verify all NNs with all routers
     cluster.registerNamenodes();
     cluster.waitNamenodeRegistration();
+
+    // We decrease the DN heartbeat expire interval to make them dead faster
+    cluster.getCluster().getNamesystem(0).getBlockManager()
+        .getDatanodeManager().setHeartbeatInterval(1);
+    cluster.getCluster().getNamesystem(1).getBlockManager()
+        .getDatanodeManager().setHeartbeatInterval(1);
+    cluster.getCluster().getNamesystem(0).getBlockManager()
+        .getDatanodeManager().setHeartbeatExpireInterval(3000);
+    cluster.getCluster().getNamesystem(1).getBlockManager()
+        .getDatanodeManager().setHeartbeatExpireInterval(3000);
   }
 
   @AfterClass
@@ -341,6 +368,11 @@ public class TestRouterRpc {
     NamenodeContext nn0 = cluster.getNamenode(ns0, null);
     this.nnNamenodeProtocol = NameNodeProxies.createProxy(nn0.getConf(),
         nn0.getFileSystem().getUri(), NamenodeProtocol.class).getProxy();
+    // Namenode from the other namespace
+    String ns1 = cluster.getNameservices().get(1);
+    NamenodeContext nn1 = cluster.getNamenode(ns1, null);
+    this.nnNamenodeProtocol1 = NameNodeProxies.createProxy(nn1.getConf(),
+        nn1.getFileSystem().getUri(), NamenodeProtocol.class).getProxy();
   }
 
   protected String getNs() {
@@ -672,6 +704,7 @@ public class TestRouterRpc {
 
     DatanodeInfo[] combinedData =
         routerProtocol.getDatanodeReport(DatanodeReportType.ALL);
+    assertEquals(0, routerProtocol.getSlowDatanodeReport().length);
     final Map<Integer, String> routerDNMap = new TreeMap<>();
     for (DatanodeInfo dn : combinedData) {
       String subcluster = dn.getNetworkLocation().split("/")[1];
@@ -861,37 +894,40 @@ public class TestRouterRpc {
     resolver.addLocation(mountPoint, ns0, "/");
 
     FsPermission permission = new FsPermission("777");
-    routerProtocol.mkdirs(mountPoint, permission, false);
     routerProtocol.mkdirs(snapshotFolder, permission, false);
-    for (int i = 1; i <= 9; i++) {
-      String folderPath = snapshotFolder + "/subfolder" + i;
-      routerProtocol.mkdirs(folderPath, permission, false);
+    try {
+      for (int i = 1; i <= 9; i++) {
+        String folderPath = snapshotFolder + "/subfolder" + i;
+        routerProtocol.mkdirs(folderPath, permission, false);
+      }
+
+      LOG.info("Create the snapshot: {}", snapshotFolder);
+      routerProtocol.allowSnapshot(snapshotFolder);
+      String snapshotName =
+          routerProtocol.createSnapshot(snapshotFolder, "snap");
+      assertEquals(snapshotFolder + "/.snapshot/snap", snapshotName);
+      assertTrue(
+          verifyFileExists(routerFS, snapshotFolder + "/.snapshot/snap"));
+
+      LOG.info("Rename the snapshot and check it changed");
+      routerProtocol.renameSnapshot(snapshotFolder, "snap", "newsnap");
+      assertFalse(
+          verifyFileExists(routerFS, snapshotFolder + "/.snapshot/snap"));
+      assertTrue(
+          verifyFileExists(routerFS, snapshotFolder + "/.snapshot/newsnap"));
+      LambdaTestUtils.intercept(SnapshotException.class,
+          "Cannot delete snapshot snap from path " + snapshotFolder + ":",
+          () -> routerFS.deleteSnapshot(new Path(snapshotFolder), "snap"));
+
+      LOG.info("Delete the snapshot and check it is not there");
+      routerProtocol.deleteSnapshot(snapshotFolder, "newsnap");
+      assertFalse(
+          verifyFileExists(routerFS, snapshotFolder + "/.snapshot/newsnap"));
+    } finally {
+      // Cleanup
+      assertTrue(routerProtocol.delete(snapshotFolder, true));
+      assertTrue(resolver.removeLocation(mountPoint, ns0, "/"));
     }
-
-    LOG.info("Create the snapshot: {}", snapshotFolder);
-    routerProtocol.allowSnapshot(snapshotFolder);
-    String snapshotName = routerProtocol.createSnapshot(
-        snapshotFolder, "snap");
-    assertEquals(snapshotFolder + "/.snapshot/snap", snapshotName);
-    assertTrue(verifyFileExists(routerFS, snapshotFolder + "/.snapshot/snap"));
-
-    LOG.info("Rename the snapshot and check it changed");
-    routerProtocol.renameSnapshot(snapshotFolder, "snap", "newsnap");
-    assertFalse(
-        verifyFileExists(routerFS, snapshotFolder + "/.snapshot/snap"));
-    assertTrue(
-        verifyFileExists(routerFS, snapshotFolder + "/.snapshot/newsnap"));
-    LambdaTestUtils.intercept(SnapshotException.class,
-        "Cannot delete snapshot snap from path " + snapshotFolder + ":",
-        () -> routerFS.deleteSnapshot(new Path(snapshotFolder), "snap"));
-
-    LOG.info("Delete the snapshot and check it is not there");
-    routerProtocol.deleteSnapshot(snapshotFolder, "newsnap");
-    assertFalse(
-        verifyFileExists(routerFS, snapshotFolder + "/.snapshot/newsnap"));
-
-    // Cleanup
-    routerProtocol.delete(mountPoint, true);
   }
 
   @Test
@@ -918,6 +954,16 @@ public class TestRouterRpc {
     SnapshottableDirectoryStatus snapshotDir0 = dirList[0];
     assertEquals(snapshotPath, snapshotDir0.getFullPath().toString());
 
+    // check for snapshot listing through the Router
+    SnapshotStatus[] snapshots = routerProtocol.
+        getSnapshotListing(snapshotPath);
+    assertEquals(2, snapshots.length);
+    assertEquals(SnapshotTestHelper.getSnapshotRoot(
+        new Path(snapshotPath), snapshot1),
+        snapshots[0].getFullPath());
+    assertEquals(SnapshotTestHelper.getSnapshotRoot(
+        new Path(snapshotPath), snapshot2),
+        snapshots[1].getFullPath());
     // Check for difference report in two snapshot
     SnapshotDiffReport diffReport = routerProtocol.getSnapshotDiffReport(
         snapshotPath, snapshot1, snapshot2);
@@ -1196,7 +1242,7 @@ public class TestRouterRpc {
         newRouterFile, clientName, null, null,
         status.getFileId(), null, null);
 
-    DatanodeInfo[] exclusions = new DatanodeInfo[0];
+    DatanodeInfo[] exclusions = DatanodeInfo.EMPTY_ARRAY;
     LocatedBlock newBlock = routerProtocol.getAdditionalDatanode(
         newRouterFile, status.getFileId(), block.getBlock(),
         block.getLocations(), block.getStorageIDs(), exclusions, 1, clientName);
@@ -1264,11 +1310,14 @@ public class TestRouterRpc {
       // Check with default namespace specified.
       NamespaceInfo rVersion = routerNamenodeProtocol.versionRequest();
       NamespaceInfo nnVersion = nnNamenodeProtocol.versionRequest();
+      NamespaceInfo nnVersion1 = nnNamenodeProtocol1.versionRequest();
       compareVersion(rVersion, nnVersion);
       // Check with default namespace unspecified.
       resolver.setDisableNamespace(true);
-      rVersion = routerNamenodeProtocol.versionRequest();
-      compareVersion(rVersion, nnVersion);
+      // Verify the NamespaceInfo is of nn0 or nn1
+      boolean isNN0 =
+          rVersion.getBlockPoolID().equals(nnVersion.getBlockPoolID());
+      compareVersion(rVersion, isNN0 ? nnVersion : nnVersion1);
     } finally {
       resolver.setDisableNamespace(false);
     }
@@ -1316,9 +1365,9 @@ public class TestRouterRpc {
 
     // Verify that checking that datanode works
     BlocksWithLocations routerBlockLocations =
-        routerNamenodeProtocol.getBlocks(dn0, 1024, 0);
+        routerNamenodeProtocol.getBlocks(dn0, 1024, 0, 0);
     BlocksWithLocations nnBlockLocations =
-        nnNamenodeProtocol.getBlocks(dn0, 1024, 0);
+        nnNamenodeProtocol.getBlocks(dn0, 1024, 0, 0);
     BlockWithLocations[] routerBlocks = routerBlockLocations.getBlocks();
     BlockWithLocations[] nnBlocks = nnBlockLocations.getBlocks();
     assertEquals(nnBlocks.length, routerBlocks.length);
@@ -1337,11 +1386,13 @@ public class TestRouterRpc {
       // Check with default namespace specified.
       long routerTransactionID = routerNamenodeProtocol.getTransactionID();
       long nnTransactionID = nnNamenodeProtocol.getTransactionID();
+      long nnTransactionID1 = nnNamenodeProtocol1.getTransactionID();
       assertEquals(nnTransactionID, routerTransactionID);
       // Check with default namespace unspecified.
       resolver.setDisableNamespace(true);
+      // Verify the transaction ID is of nn0 or nn1
       routerTransactionID = routerNamenodeProtocol.getTransactionID();
-      assertEquals(nnTransactionID, routerTransactionID);
+      assertThat(routerTransactionID).isIn(nnTransactionID, nnTransactionID1);
     } finally {
       resolver.setDisableNamespace(false);
     }
@@ -1711,6 +1762,14 @@ public class TestRouterRpc {
   }
 
   @Test
+  public void testNamenodeMetricsEnteringMaintenanceNodes() throws IOException {
+    final NamenodeBeanMetrics metrics =
+            router.getRouter().getNamenodeMetrics();
+
+    assertEquals("{}", metrics.getEnteringMaintenanceNodes());
+  }
+
+  @Test
   public void testCacheAdmin() throws Exception {
     DistributedFileSystem routerDFS = (DistributedFileSystem) routerFS;
     // Verify cache directive commands.
@@ -1777,6 +1836,66 @@ public class TestRouterRpc {
     assertArrayEquals(group, result);
   }
 
+  @Test
+  public void testGetCachedDatanodeReport() throws Exception {
+    RouterRpcServer rpcServer = router.getRouter().getRpcServer();
+    final DatanodeInfo[] datanodeReport =
+        rpcServer.getCachedDatanodeReport(DatanodeReportType.LIVE);
+
+    // We should have 12 nodes in total
+    assertEquals(12, datanodeReport.length);
+
+    // We should be caching this information
+    DatanodeInfo[] datanodeReport1 =
+        rpcServer.getCachedDatanodeReport(DatanodeReportType.LIVE);
+    assertArrayEquals(datanodeReport1, datanodeReport);
+
+    // Stop one datanode
+    MiniDFSCluster miniDFSCluster = getCluster().getCluster();
+    DataNodeProperties dnprop = miniDFSCluster.stopDataNode(0);
+
+    // We wait until the cached value is updated
+    GenericTestUtils.waitFor(new Supplier<Boolean>() {
+      @Override
+      public Boolean get() {
+        DatanodeInfo[] dn = null;
+        try {
+          dn = rpcServer.getCachedDatanodeReport(DatanodeReportType.LIVE);
+        } catch (IOException ex) {
+          LOG.error("Error on getCachedDatanodeReport");
+        }
+        return !Arrays.equals(datanodeReport, dn);
+      }
+    }, 500, 5 * 1000);
+
+    // The cache should be updated now
+    final DatanodeInfo[] datanodeReport2 =
+        rpcServer.getCachedDatanodeReport(DatanodeReportType.LIVE);
+    assertEquals(datanodeReport.length - 1, datanodeReport2.length);
+
+    // Restart the DN we just stopped
+    miniDFSCluster.restartDataNode(dnprop);
+    miniDFSCluster.waitActive();
+
+    GenericTestUtils.waitFor(new Supplier<Boolean>() {
+      @Override
+      public Boolean get() {
+        DatanodeInfo[] dn = null;
+        try {
+          dn = rpcServer.getCachedDatanodeReport(DatanodeReportType.LIVE);
+        } catch (IOException ex) {
+          LOG.error("Error on getCachedDatanodeReport");
+        }
+        return datanodeReport.length == dn.length;
+      }
+    }, 100, 10 * 1000);
+
+    // The cache should be updated now
+    final DatanodeInfo[] datanodeReport3 =
+        rpcServer.getCachedDatanodeReport(DatanodeReportType.LIVE);
+    assertEquals(datanodeReport.length, datanodeReport3.length);
+  }
+
   /**
    * Check the erasure coding policies in the Router and the Namenode.
    * @return The erasure coding policies.
@@ -1813,5 +1932,76 @@ public class TestRouterRpc {
       }
     }
     return null;
+  }
+
+  @Test
+  public void testMkdirsWithCallerContext() throws IOException {
+    GenericTestUtils.LogCapturer auditlog =
+        GenericTestUtils.LogCapturer.captureLogs(FSNamesystem.auditLog);
+
+    // Current callerContext is null
+    assertNull(CallerContext.getCurrent());
+
+    // Set client context
+    CallerContext.setCurrent(
+        new CallerContext.Builder("clientContext").build());
+
+    // Create a directory via the router
+    String dirPath = "/test_dir_with_callercontext";
+    FsPermission permission = new FsPermission("755");
+    routerProtocol.mkdirs(dirPath, permission, false);
+
+    // The audit log should contains "callerContext=clientIp:...,clientContext"
+    final String logOutput = auditlog.getOutput();
+    assertTrue(logOutput.contains("callerContext=clientIp:"));
+    assertTrue(logOutput.contains(",clientContext"));
+    assertTrue(verifyFileExists(routerFS, dirPath));
+  }
+
+  @Test
+  public void testSetBalancerBandwidth() throws Exception {
+    long defaultBandwidth =
+        DFSConfigKeys.DFS_DATANODE_BALANCE_BANDWIDTHPERSEC_DEFAULT;
+    long newBandwidth = defaultBandwidth * 2;
+    routerProtocol.setBalancerBandwidth(newBandwidth);
+    ArrayList<DataNode> datanodes = cluster.getCluster().getDataNodes();
+    GenericTestUtils.waitFor(() ->  {
+      return datanodes.get(0).getBalancerBandwidth() == newBandwidth;
+    }, 100, 60 * 1000);
+  }
+
+  @Test
+  public void testAddClientIpPortToCallerContext() throws IOException {
+    GenericTestUtils.LogCapturer auditLog =
+        GenericTestUtils.LogCapturer.captureLogs(FSNamesystem.auditLog);
+
+    // 1. ClientIp and ClientPort are not set on the client.
+    // Set client context.
+    CallerContext.setCurrent(
+        new CallerContext.Builder("clientContext").build());
+
+    // Create a directory via the router.
+    String dirPath = "/test";
+    routerProtocol.mkdirs(dirPath, new FsPermission("755"), false);
+
+    // The audit log should contains "clientIp:" and "clientPort:".
+    assertTrue(auditLog.getOutput().contains("clientIp:"));
+    assertTrue(auditLog.getOutput().contains("clientPort:"));
+    assertTrue(verifyFileExists(routerFS, dirPath));
+    auditLog.clearOutput();
+
+    // 2. ClientIp and ClientPort are set on the client.
+    // Reset client context.
+    CallerContext.setCurrent(
+        new CallerContext.Builder(
+            "clientContext,clientIp:1.1.1.1,clientPort:1234").build());
+
+    // Create a directory via the router.
+    routerProtocol.getFileInfo(dirPath);
+
+    // The audit log should not contain the original clientIp and clientPort
+    // set by client.
+    assertFalse(auditLog.getOutput().contains("clientIp:1.1.1.1"));
+    assertFalse(auditLog.getOutput().contains("clientPort:1234"));
   }
 }

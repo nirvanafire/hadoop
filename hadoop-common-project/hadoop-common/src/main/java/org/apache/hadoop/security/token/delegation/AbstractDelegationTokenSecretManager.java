@@ -22,18 +22,33 @@ import java.io.ByteArrayInputStream;
 import java.io.DataInputStream;
 import java.io.IOException;
 import java.security.MessageDigest;
+import java.util.ArrayList;
 import java.util.Collection;
-import java.util.HashMap;
+import java.util.Collections;
 import java.util.HashSet;
 import java.util.Iterator;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 
 import javax.crypto.SecretKey;
 
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
+import org.apache.hadoop.fs.statistics.DurationTracker;
+import org.apache.hadoop.fs.statistics.DurationTrackerFactory;
+import org.apache.hadoop.fs.statistics.impl.IOStatisticsBinding;
+import org.apache.hadoop.fs.statistics.impl.IOStatisticsStore;
 import org.apache.hadoop.io.Text;
+import org.apache.hadoop.metrics2.annotation.Metric;
+import org.apache.hadoop.metrics2.annotation.Metrics;
+import org.apache.hadoop.metrics2.lib.DefaultMetricsSystem;
+import org.apache.hadoop.metrics2.lib.MetricsRegistry;
+import org.apache.hadoop.metrics2.lib.MutableCounterLong;
+import org.apache.hadoop.metrics2.lib.MutableRate;
+import org.apache.hadoop.metrics2.util.Metrics2Util.NameValuePair;
+import org.apache.hadoop.metrics2.util.Metrics2Util.TopN;
 import org.apache.hadoop.security.AccessControlException;
 import org.apache.hadoop.security.HadoopKerberosName;
 import org.apache.hadoop.security.token.SecretManager;
@@ -41,7 +56,8 @@ import org.apache.hadoop.security.token.Token;
 import org.apache.hadoop.util.Daemon;
 import org.apache.hadoop.util.Time;
 
-import com.google.common.base.Preconditions;
+import org.apache.hadoop.util.Preconditions;
+import org.apache.hadoop.util.functional.InvocationRaisingIOE;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -63,8 +79,14 @@ extends AbstractDelegationTokenIdentifier>
    * to DelegationTokenInformation. Protected by this object lock.
    */
   protected final Map<TokenIdent, DelegationTokenInformation> currentTokens 
-      = new HashMap<TokenIdent, DelegationTokenInformation>();
-  
+      = new ConcurrentHashMap<>();
+
+  /**
+   * Map of token real owners to its token count. This is used to generate
+   * metrics of top users by owned tokens.
+   */
+  protected final Map<String, Long> tokenOwnerStats = new ConcurrentHashMap<>();
+
   /**
    * Sequence number to create DelegationTokenIdentifier.
    * Protected by this object lock.
@@ -75,7 +97,7 @@ extends AbstractDelegationTokenIdentifier>
    * Access to allKeys is protected by this object lock
    */
   protected final Map<Integer, DelegationKey> allKeys 
-      = new HashMap<Integer, DelegationKey>();
+      = new ConcurrentHashMap<>();
   
   /**
    * Access to currentId is protected by this object lock.
@@ -85,6 +107,10 @@ extends AbstractDelegationTokenIdentifier>
    * Access to currentKey is protected by this object lock
    */
   private DelegationKey currentKey;
+  /**
+   * Metrics to track token management operations.
+   */
+  private DelegationTokenSecretManagerMetrics metrics;
   
   private long keyUpdateInterval;
   private long tokenMaxLifetime;
@@ -123,6 +149,7 @@ extends AbstractDelegationTokenIdentifier>
     this.tokenRenewInterval = delegationTokenRenewInterval;
     this.tokenRemoverScanInterval = delegationTokenRemoverScanInterval;
     this.storeTokenTrackingId = false;
+    this.metrics = DelegationTokenSecretManagerMetrics.create();
   }
 
   /** should be called before this object is used */
@@ -292,6 +319,7 @@ extends AbstractDelegationTokenIdentifier>
   protected void storeToken(TokenIdent ident,
       DelegationTokenInformation tokenInfo) throws IOException {
     currentTokens.put(ident, tokenInfo);
+    addTokenForOwnerStats(ident);
     storeNewToken(ident, tokenInfo.getRenewDate());
   }
 
@@ -339,6 +367,7 @@ extends AbstractDelegationTokenIdentifier>
     if (getTokenInfo(identifier) == null) {
       currentTokens.put(identifier, new DelegationTokenInformation(renewDate,
           password, getTrackingIdIfEnabled(identifier)));
+      addTokenForOwnerStats(identifier);
     } else {
       throw new IOException("Same delegation token being added twice: "
           + formatTokenId(identifier));
@@ -417,14 +446,14 @@ extends AbstractDelegationTokenIdentifier>
     DelegationTokenInformation tokenInfo = new DelegationTokenInformation(now
         + tokenRenewInterval, password, getTrackingIdIfEnabled(identifier));
     try {
-      storeToken(identifier, tokenInfo);
+      metrics.trackStoreToken(() -> storeToken(identifier, tokenInfo));
     } catch (IOException ioe) {
       LOG.error("Could not store token " + formatTokenId(identifier) + "!!",
           ioe);
     }
     return password;
   }
-  
+
 
 
   /**
@@ -542,7 +571,7 @@ extends AbstractDelegationTokenIdentifier>
       throw new InvalidToken("Renewal request for unknown token "
           + formatTokenId(id));
     }
-    updateToken(id, info);
+    metrics.trackUpdateToken(() -> updateToken(id, info));
     return renewTime;
   }
   
@@ -578,7 +607,10 @@ extends AbstractDelegationTokenIdentifier>
     if (info == null) {
       throw new InvalidToken("Token not found " + formatTokenId(id));
     }
-    removeStoredToken(id);
+    metrics.trackRemoveToken(() -> {
+      removeTokenForOwnerStats(id);
+      removeStoredToken(id);
+    });
     return id;
   }
   
@@ -634,6 +666,7 @@ extends AbstractDelegationTokenIdentifier>
         long renewDate = entry.getValue().getRenewDate();
         if (renewDate < now) {
           expiredTokens.add(entry.getKey());
+          removeTokenForOwnerStats(entry.getKey());
           i.remove();
         }
       }
@@ -726,4 +759,181 @@ extends AbstractDelegationTokenIdentifier>
     return token.decodeIdentifier();
   }
 
+  /**
+   * Return top token real owners list as well as the tokens count.
+   *
+   * @param n top number of users
+   * @return map of owners to counts
+   */
+  public List<NameValuePair> getTopTokenRealOwners(int n) {
+    n = Math.min(n, tokenOwnerStats.size());
+    if (n == 0) {
+      return new ArrayList<>();
+    }
+
+    TopN topN = new TopN(n);
+    for (Map.Entry<String, Long> entry : tokenOwnerStats.entrySet()) {
+      topN.offer(new NameValuePair(
+          entry.getKey(), entry.getValue()));
+    }
+
+    List<NameValuePair> list = new ArrayList<>();
+    while (!topN.isEmpty()) {
+      list.add(topN.poll());
+    }
+    Collections.reverse(list);
+    return list;
+  }
+
+  /**
+   * Return the real owner for a token. If this is a token from a proxy user,
+   * the real/effective user will be returned.
+   *
+   * @param id
+   * @return real owner
+   */
+  private String getTokenRealOwner(TokenIdent id) {
+    String realUser;
+    if (id.getRealUser() != null && !id.getRealUser().toString().isEmpty()) {
+      realUser = id.getRealUser().toString();
+    } else {
+      // if there is no real user -> this is a non proxy user
+      // the user itself is the real owner
+      realUser = id.getUser().getUserName();
+    }
+    return realUser;
+  }
+
+  /**
+   * Add token stats to the owner to token count mapping.
+   *
+   * @param id
+   */
+  private void addTokenForOwnerStats(TokenIdent id) {
+    String realOwner = getTokenRealOwner(id);
+    tokenOwnerStats.put(realOwner,
+        tokenOwnerStats.getOrDefault(realOwner, 0L)+1);
+  }
+
+  /**
+   * Remove token stats to the owner to token count mapping.
+   *
+   * @param id
+   */
+  private void removeTokenForOwnerStats(TokenIdent id) {
+    String realOwner = getTokenRealOwner(id);
+    if (tokenOwnerStats.containsKey(realOwner)) {
+      // unlikely to be less than 1 but in case
+      if (tokenOwnerStats.get(realOwner) <= 1) {
+        tokenOwnerStats.remove(realOwner);
+      } else {
+        tokenOwnerStats.put(realOwner, tokenOwnerStats.get(realOwner)-1);
+      }
+    }
+  }
+
+  /**
+   * This method syncs token information from currentTokens to tokenOwnerStats.
+   * It is used when the currentTokens is initialized or refreshed. This is
+   * called from a single thread thus no synchronization is needed.
+   */
+  protected void syncTokenOwnerStats() {
+    tokenOwnerStats.clear();
+    for (TokenIdent id : currentTokens.keySet()) {
+      addTokenForOwnerStats(id);
+    }
+  }
+
+  protected DelegationTokenSecretManagerMetrics getMetrics() {
+    return metrics;
+  }
+
+  /**
+   * DelegationTokenSecretManagerMetrics tracks token management operations
+   * and publishes them through the metrics interfaces.
+   */
+  @Metrics(about="Delegation token secret manager metrics", context="token")
+  static class DelegationTokenSecretManagerMetrics implements DurationTrackerFactory {
+    private static final Logger LOG = LoggerFactory.getLogger(
+        DelegationTokenSecretManagerMetrics.class);
+
+    final static String STORE_TOKEN_STAT = "storeToken";
+    final static String UPDATE_TOKEN_STAT = "updateToken";
+    final static String REMOVE_TOKEN_STAT = "removeToken";
+    final static String TOKEN_FAILURE_STAT = "tokenFailure";
+
+    private final MetricsRegistry registry;
+    private final IOStatisticsStore ioStatistics;
+
+    @Metric("Rate of storage of delegation tokens and latency (milliseconds)")
+    private MutableRate storeToken;
+    @Metric("Rate of update of delegation tokens and latency (milliseconds)")
+    private MutableRate updateToken;
+    @Metric("Rate of removal of delegation tokens and latency (milliseconds)")
+    private MutableRate removeToken;
+    @Metric("Counter of delegation tokens operation failures")
+    private MutableCounterLong tokenFailure;
+
+    static DelegationTokenSecretManagerMetrics create() {
+      return DefaultMetricsSystem.instance().register(new DelegationTokenSecretManagerMetrics());
+    }
+
+    DelegationTokenSecretManagerMetrics() {
+      ioStatistics = IOStatisticsBinding.iostatisticsStore()
+          .withDurationTracking(STORE_TOKEN_STAT, UPDATE_TOKEN_STAT, REMOVE_TOKEN_STAT)
+          .withCounters(TOKEN_FAILURE_STAT)
+          .build();
+      registry = new MetricsRegistry("DelegationTokenSecretManagerMetrics");
+      LOG.debug("Initialized {}", registry);
+    }
+
+    public void trackStoreToken(InvocationRaisingIOE invocation) throws IOException {
+      trackInvocation(invocation, STORE_TOKEN_STAT, storeToken);
+    }
+
+    public void trackUpdateToken(InvocationRaisingIOE invocation) throws IOException {
+      trackInvocation(invocation, UPDATE_TOKEN_STAT, updateToken);
+    }
+
+    public void trackRemoveToken(InvocationRaisingIOE invocation) throws IOException {
+      trackInvocation(invocation, REMOVE_TOKEN_STAT, removeToken);
+    }
+
+    public void trackInvocation(InvocationRaisingIOE invocation, String statistic,
+        MutableRate metric) throws IOException {
+      try {
+        long start = Time.monotonicNow();
+        IOStatisticsBinding.trackDurationOfInvocation(this, statistic, invocation);
+        metric.add(Time.monotonicNow() - start);
+      } catch (Exception ex) {
+        tokenFailure.incr();
+        throw ex;
+      }
+    }
+
+    @Override
+    public DurationTracker trackDuration(String key, long count) {
+      return ioStatistics.trackDuration(key, count);
+    }
+
+    protected MutableRate getStoreToken() {
+      return storeToken;
+    }
+
+    protected MutableRate getUpdateToken() {
+      return updateToken;
+    }
+
+    protected MutableRate getRemoveToken() {
+      return removeToken;
+    }
+
+    protected MutableCounterLong getTokenFailure() {
+      return tokenFailure;
+    }
+
+    protected IOStatisticsStore getIoStatistics() {
+      return ioStatistics;
+    }
+  }
 }

@@ -41,6 +41,7 @@ public class TestReadOnly {
           "getListing",
           "getBatchedListing",
           "getSnapshottableDirListing",
+          "getSnapshotListing",
           "getPreferredBlockSize",
           "listCorruptFileBlocks",
           "getFileInfo",
@@ -75,7 +76,8 @@ public class TestReadOnly {
           "getQuotaUsage",
           "msync",
           "getHAServiceState",
-          "getECTopologyResultForPolicies"
+          "getECTopologyResultForPolicies",
+          "getSlowDatanodeReport"
       )
   );
 

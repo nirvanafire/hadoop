@@ -20,6 +20,9 @@ package org.apache.hadoop.fs.s3a;
 
 import java.time.Duration;
 
+import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.s3a.test.PublicDatasetTestUtils;
+
 /**
  * Constants for S3A Testing.
  */
@@ -88,9 +91,30 @@ public interface S3ATestConstants {
   String KEY_CSVTEST_FILE = S3A_SCALE_TEST + "csvfile";
 
   /**
+   * The landsat bucket: {@value}.
+   */
+  String LANDSAT_BUCKET = "s3a://landsat-pds/";
+
+  /**
    * Default path for the multi MB test file: {@value}.
    */
-  String DEFAULT_CSVTEST_FILE = "s3a://landsat-pds/scene_list.gz";
+  String DEFAULT_CSVTEST_FILE = LANDSAT_BUCKET + "scene_list.gz";
+
+  /**
+   * Configuration key for an existing object in a requester pays bucket: {@value}.
+   *
+   * Accessible via
+   * {@link PublicDatasetTestUtils#getRequesterPaysObject(Configuration)}.
+   */
+  String KEY_REQUESTER_PAYS_FILE = TEST_FS_S3A + "requester.pays.file";
+
+  /**
+   * Configuration key for an existing bucket with many objects: {@value}.
+   *
+   * This is used for tests depending on buckets with a large number of keys.
+   */
+  String KEY_BUCKET_WITH_MANY_OBJECTS
+      = TEST_FS_S3A + "bucket-with-many-objects";
 
   /**
    * Name of the property to define the timeout for scale tests: {@value}.
@@ -159,19 +183,9 @@ public interface S3ATestConstants {
   String TEST_STS_ENDPOINT = "test.fs.s3a.sts.endpoint";
 
   /**
-   * Various S3Guard tests.
+   * ACL for S3 Logging; used in some tests: {@value}.
    */
-  String TEST_S3GUARD_PREFIX = "fs.s3a.s3guard.test";
-  String TEST_S3GUARD_ENABLED = TEST_S3GUARD_PREFIX + ".enabled";
-  String TEST_S3GUARD_AUTHORITATIVE = TEST_S3GUARD_PREFIX + ".authoritative";
-  String TEST_S3GUARD_IMPLEMENTATION = TEST_S3GUARD_PREFIX + ".implementation";
-  String TEST_S3GUARD_IMPLEMENTATION_LOCAL = "local";
-  String TEST_S3GUARD_IMPLEMENTATION_DYNAMO = "dynamo";
-  String TEST_S3GUARD_IMPLEMENTATION_NONE = "none";
-
-  String TEST_S3GUARD_DYNAMO_TABLE_PREFIX =
-      "fs.s3a.s3guard.test.dynamo.table.prefix";
-  String TEST_S3GUARD_DYNAMO_TABLE_PREFIX_DEFAULT = "s3guard.test.";
+  String LOG_DELIVERY_WRITE = "LogDeliveryWrite";
 
   /**
    * Timeout in Milliseconds for standard tests: {@value}.
@@ -209,13 +223,21 @@ public interface S3ATestConstants {
       TEST_SESSION_TOKEN_DURATION_SECONDS);
 
   /**
-   * Test table name to use during DynamoDB integration tests in
-   * {@code ITestDynamoDBMetadataStore}.
-   *
-   * The table will be modified, and deleted in the end of the tests.
-   * If this value is not set, the integration tests that would be destructive
-   * won't run.
+   * Test option to enable audits of the method path after
+   * every test case.
    */
-  String S3GUARD_DDB_TEST_TABLE_NAME_KEY =
-      "fs.s3a.s3guard.ddb.test.table";
+  String DIRECTORY_MARKER_AUDIT = "fs.s3a.directory.marker.audit";
+
+  /**
+   * Constant bytes being written when Client side encryption KMS is enabled
+   * for a test. This bytes written takes into account "EncryptionContext",
+   * which contains the algo used for eg:
+   * "aws:x-amz-cek-alg":"AES/GCM/NoPadding" , and "KeySpec", which specifies
+   * the length of data key. for eg: AES_256 to generate a 256-bit symmetric
+   * key.
+   *
+   * For test using bytesWritten as an assertion this constant value can be
+   * used.
+   */
+  int KMS_KEY_GENERATION_REQUEST_PARAMS_BYTES_WRITTEN = 94;
 }

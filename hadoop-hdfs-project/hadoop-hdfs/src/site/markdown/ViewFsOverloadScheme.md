@@ -28,9 +28,16 @@ View File System Overload Scheme
 
 ### Details
 
-The View File System Overload Scheme is an extension to the View File System. This will allow users to continue to use their existing fs.defaultFS configured scheme or any new scheme name instead of using scheme `viewfs`. Mount link configurations key, value formats are same as in [ViewFS Guide](./ViewFs.html). If a user wants to continue use the same fs.defaultFS and wants to have more mount points, then mount link configurations should have the current fs.defaultFS authority name as mount table name. Example if fs.defaultFS is `hdfs://mycluster`, then the mount link configuration key name should be like in the following format `fs.viewfs.mounttable.*mycluster*.link.<mountLinkPath>`. We will discuss more example configurations in following sections.
+The View File System Overload Scheme is an extension to the View File System. This will allow users to continue to use their existing fs.defaultFS configured scheme or any new scheme name instead of using scheme `viewfs`.
+Mount link configurations key, value formats are same as in [ViewFS Guide](./ViewFs.html).
+If a user wants to continue use the same fs.defaultFS and wants to have more mount points, then mount link configurations should have the ViewFileSystemOverloadScheme initialized uri's hostname as the mount table name.
+Example if fs.defaultFS is `hdfs://mycluster`, then the mount link configuration key name should be like in the following format `fs.viewfs.mounttable.*mycluster*.link.<mountLinkPath>`.
+Even if the initialized fs uri has hostname:port, it will simply ignore the port number and only consider the hostname as the mount table name.  We will discuss more example configurations in following sections.
+If there are no mount links configured with the initializing uri's hostname as the mount table name, then it will automatically consider the current uri as fallback(`fs.viewfs.mounttable.*mycluster*.linkFallback`) target fs uri.
+If the initialized uri contains path part, it will consider only scheme and authority part, but not the path part. Example, if the initialized uri contains `hdfs://mycluster/data`, it will consider only `hdfs://mycluster` as fallback target fs uri.
+The path part `data` will be ignored.
 
-Another important improvement with the ViewFileSystemOverloadScheme is, administrators need not copy the `mount-table.xml` configuration file to 1000s of client nodes. Instead they can keep the mount-table configuration file in a Hadoop compatible file system. So, keeping the configuration file in a central place makes administrators life easier as they can update mount-table in single place.
+Another important improvement with the ViewFileSystemOverloadScheme is, administrators need not copy the `mount-table.xml` configuration file to 1000s of client nodes. Instead, they can keep the mount-table configuration file in a Hadoop compatible file system. So, keeping the configuration file in a central place makes administrators life easier as they can update mount-table in single place.
 
 ### Enabling View File System Overload Scheme
 
@@ -149,6 +156,39 @@ DFSAdmin commands with View File System Overload Scheme
 -------------------------------------------------------
 
 Please refer to the [HDFSCommands Guide](./HDFSCommands.html#dfsadmin_with_ViewFsOverloadScheme)
+
+Accessing paths without authority
+---------------------------------
+
+Accessing paths like `hdfs:///foo/bar`, `hdfs:/foo/bar` or `viewfs:/foo/bar`, where the authority (cluster name or hostname) of the path is not specified, is very common.
+This is especially true when the same code is expected to run on multiple clusters with different names or HDFS Namenodes.
+
+When `ViewFileSystemOverloadScheme` is used (as described above), and if (a) the scheme of the path being accessed is different from the scheme of the path specified as `fs.defaultFS`
+and (b) if the path doesn't have an authority specified, accessing the path can result in an error like `Empty Mount table in config for viewfs://default/`.
+For example, when the following configuration is used but a path like `viewfs:/foo/bar` or `viewfs:///foo/bar` is accessed, such an error arises.
+```xml
+<property>
+  <name>fs.hdfs.impl</name>
+  <value>org.apache.hadoop.fs.viewfs.ViewFileSystemOverloadScheme</value>
+</property>
+
+<property>
+  <name>fs.defaultFS</name>
+  <value>hdfs://cluster/</value>
+</property>
+```
+
+### Solution
+To avoid the above problem, the configuration `fs.viewfs.mounttable.default.name.key` has to be set to the name of the cluster, i.e, the following should be added to `core-site.xml`
+```xml
+<property>
+  <name>fs.viewfs.mounttable.default.name.key</name>
+  <value>cluster</value>
+</property>
+```
+The string in this configuration `cluster` should match the name of the authority in the value of `fs.defaultFS`. Further, the configuration should have a mount table
+configured correctly as in the above examples, i.e., the configurations `fs.viewfs.mounttable.*cluster*.link.<mountLinkPath>` should be set (note the same string
+`cluster` is used in these configurations).
 
 Appendix: A Mount Table Configuration with XInclude
 ---------------------------------------------------

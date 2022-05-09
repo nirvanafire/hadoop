@@ -42,8 +42,8 @@ import org.apache.hadoop.security.AccessControlException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import com.google.common.collect.ArrayListMultimap;
-import com.google.common.collect.ListMultimap;
+import org.apache.hadoop.thirdparty.com.google.common.collect.ArrayListMultimap;
+import org.apache.hadoop.thirdparty.com.google.common.collect.ListMultimap;
 
 /**
  * Module that implements the quota relevant RPC calls
@@ -80,6 +80,9 @@ public class Quota {
    */
   public void setQuota(String path, long namespaceQuota, long storagespaceQuota,
       StorageType type, boolean checkMountEntry) throws IOException {
+    if (!router.isQuotaEnabled()) {
+      throw new IOException("The quota system is disabled in Router.");
+    }
     if (checkMountEntry && isMountEntry(path)) {
       throw new AccessControlException(
           "Permission denied: " + RouterRpcServer.getRemoteUser()
@@ -101,9 +104,6 @@ public class Quota {
       long namespaceQuota, long storagespaceQuota, StorageType type)
       throws IOException {
     rpcServer.checkOperation(OperationCategory.WRITE);
-    if (!router.isQuotaEnabled()) {
-      throw new IOException("The quota system is disabled in Router.");
-    }
 
     // Set quota for current path and its children mount table path.
     if (locations == null) {

@@ -24,8 +24,6 @@ import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.List;
 
-import com.google.common.collect.Lists;
-
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
@@ -89,6 +87,7 @@ import org.apache.hadoop.hdfs.protocol.RollingUpgradeInfo;
 import org.apache.hadoop.hdfs.protocol.SnapshotDiffReport;
 import org.apache.hadoop.hdfs.protocol.SnapshotDiffReportListing;
 import org.apache.hadoop.hdfs.protocol.SnapshottableDirectoryStatus;
+import org.apache.hadoop.hdfs.protocol.SnapshotStatus;
 import org.apache.hadoop.hdfs.protocol.proto.AclProtos.GetAclStatusRequestProto;
 import org.apache.hadoop.hdfs.protocol.proto.AclProtos.GetAclStatusResponseProto;
 import org.apache.hadoop.hdfs.protocol.proto.AclProtos.ModifyAclEntriesRequestProto;
@@ -144,12 +143,15 @@ import org.apache.hadoop.hdfs.protocol.proto.ClientNamenodeProtocolProtos.GetLoc
 import org.apache.hadoop.hdfs.protocol.proto.ClientNamenodeProtocolProtos.GetPreferredBlockSizeRequestProto;
 import org.apache.hadoop.hdfs.protocol.proto.ClientNamenodeProtocolProtos.GetQuotaUsageRequestProto;
 import org.apache.hadoop.hdfs.protocol.proto.ClientNamenodeProtocolProtos.GetServerDefaultsRequestProto;
+import org.apache.hadoop.hdfs.protocol.proto.ClientNamenodeProtocolProtos.GetSlowDatanodeReportRequestProto;
 import org.apache.hadoop.hdfs.protocol.proto.ClientNamenodeProtocolProtos.GetSnapshotDiffReportRequestProto;
 import org.apache.hadoop.hdfs.protocol.proto.ClientNamenodeProtocolProtos.GetSnapshotDiffReportResponseProto;
 import org.apache.hadoop.hdfs.protocol.proto.ClientNamenodeProtocolProtos.GetSnapshotDiffReportListingRequestProto;
 import org.apache.hadoop.hdfs.protocol.proto.ClientNamenodeProtocolProtos.GetSnapshotDiffReportListingResponseProto;
 import org.apache.hadoop.hdfs.protocol.proto.ClientNamenodeProtocolProtos.GetSnapshottableDirListingRequestProto;
 import org.apache.hadoop.hdfs.protocol.proto.ClientNamenodeProtocolProtos.GetSnapshottableDirListingResponseProto;
+import org.apache.hadoop.hdfs.protocol.proto.ClientNamenodeProtocolProtos.GetSnapshotListingRequestProto;
+import org.apache.hadoop.hdfs.protocol.proto.ClientNamenodeProtocolProtos.GetSnapshotListingResponseProto;
 import org.apache.hadoop.hdfs.protocol.proto.ClientNamenodeProtocolProtos.GetStoragePoliciesRequestProto;
 import org.apache.hadoop.hdfs.protocol.proto.ClientNamenodeProtocolProtos.GetStoragePoliciesResponseProto;
 import org.apache.hadoop.hdfs.protocol.proto.ClientNamenodeProtocolProtos.GetStoragePolicyRequestProto;
@@ -253,6 +255,7 @@ import org.apache.hadoop.thirdparty.protobuf.ByteString;
 import org.apache.hadoop.thirdparty.protobuf.Message;
 import org.apache.hadoop.thirdparty.protobuf.ServiceException;
 
+import org.apache.hadoop.util.Lists;
 import org.apache.hadoop.util.concurrent.AsyncGet;
 
 /**
@@ -994,9 +997,7 @@ public class ClientNamenodeProtocolTranslatorPB implements
         .setSrc(src).build();
     try {
       GetFileLinkInfoResponseProto result = rpcProxy.getFileLinkInfo(null, req);
-      return result.hasFs() ?
-          PBHelperClient.convert(rpcProxy.getFileLinkInfo(null, req).getFs()) :
-          null;
+      return result.hasFs() ? PBHelperClient.convert(result.getFs()) : null;
     } catch (ServiceException e) {
       throw ProtobufHelper.getRemoteException(e);
     }
@@ -1292,6 +1293,25 @@ public class ClientNamenodeProtocolTranslatorPB implements
 
       if (result.hasSnapshottableDirList()) {
         return PBHelperClient.convert(result.getSnapshottableDirList());
+      }
+      return null;
+    } catch (ServiceException e) {
+      throw ProtobufHelper.getRemoteException(e);
+    }
+  }
+
+  @Override
+  public SnapshotStatus[] getSnapshotListing(String path)
+      throws IOException {
+    GetSnapshotListingRequestProto req =
+        GetSnapshotListingRequestProto.newBuilder()
+            .setSnapshotRoot(path).build();
+    try {
+      GetSnapshotListingResponseProto result = rpcProxy
+          .getSnapshotListing(null, req);
+
+      if (result.hasSnapshotList()) {
+        return PBHelperClient.convert(result.getSnapshotList());
       }
       return null;
     } catch (ServiceException e) {
@@ -2041,6 +2061,18 @@ public class ClientNamenodeProtocolTranslatorPB implements
         SatisfyStoragePolicyRequestProto.newBuilder().setSrc(src).build();
     try {
       rpcProxy.satisfyStoragePolicy(null, req);
+    } catch (ServiceException e) {
+      throw ProtobufHelper.getRemoteException(e);
+    }
+  }
+
+  @Override
+  public DatanodeInfo[] getSlowDatanodeReport() throws IOException {
+    GetSlowDatanodeReportRequestProto req =
+        GetSlowDatanodeReportRequestProto.newBuilder().build();
+    try {
+      return PBHelperClient.convert(
+          rpcProxy.getSlowDatanodeReport(null, req).getDatanodeInfoProtoList());
     } catch (ServiceException e) {
       throw ProtobufHelper.getRemoteException(e);
     }

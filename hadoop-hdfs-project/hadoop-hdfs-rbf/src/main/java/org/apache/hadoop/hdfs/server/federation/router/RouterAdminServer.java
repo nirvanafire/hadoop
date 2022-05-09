@@ -20,16 +20,18 @@ package org.apache.hadoop.hdfs.server.federation.router;
 import static org.apache.hadoop.fs.CommonConfigurationKeysPublic.HADOOP_SECURITY_AUTHORIZATION;
 import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_PERMISSIONS_ENABLED_DEFAULT;
 import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_PERMISSIONS_ENABLED_KEY;
+import static org.apache.hadoop.hdfs.server.federation.fairness.RefreshFairnessPolicyControllerHandler.HANDLER_IDENTIFIER;
 
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
-import com.google.common.base.Preconditions;
+import org.apache.hadoop.util.Preconditions;
 
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.Path;
@@ -44,6 +46,7 @@ import org.apache.hadoop.hdfs.protocolPB.RouterAdminProtocol;
 import org.apache.hadoop.hdfs.protocolPB.RouterAdminProtocolPB;
 import org.apache.hadoop.hdfs.protocolPB.RouterAdminProtocolServerSideTranslatorPB;
 import org.apache.hadoop.hdfs.protocolPB.RouterPolicyProvider;
+import org.apache.hadoop.hdfs.server.federation.fairness.RefreshFairnessPolicyControllerHandler;
 import org.apache.hadoop.hdfs.server.federation.resolver.ActiveNamenodeResolver;
 import org.apache.hadoop.hdfs.server.federation.resolver.FederationNamespaceInfo;
 import org.apache.hadoop.hdfs.server.federation.resolver.MountTableResolver;
@@ -80,19 +83,24 @@ import org.apache.hadoop.hdfs.server.namenode.NameNode;
 import org.apache.hadoop.ipc.ProtobufRpcEngine2;
 import org.apache.hadoop.ipc.RPC;
 import org.apache.hadoop.ipc.RPC.Server;
+import org.apache.hadoop.ipc.RefreshCallQueueProtocol;
 import org.apache.hadoop.ipc.RefreshRegistry;
 import org.apache.hadoop.ipc.RefreshResponse;
 import org.apache.hadoop.ipc.proto.GenericRefreshProtocolProtos;
+import org.apache.hadoop.ipc.proto.RefreshCallQueueProtocolProtos;
 import org.apache.hadoop.ipc.protocolPB.GenericRefreshProtocolPB;
 import org.apache.hadoop.ipc.protocolPB.GenericRefreshProtocolServerSideTranslatorPB;
+import org.apache.hadoop.ipc.protocolPB.RefreshCallQueueProtocolPB;
+import org.apache.hadoop.ipc.protocolPB.RefreshCallQueueProtocolServerSideTranslatorPB;
 import org.apache.hadoop.security.AccessControlException;
 import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.hadoop.security.authorize.ProxyUsers;
 import org.apache.hadoop.service.AbstractService;
+import org.apache.hadoop.util.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import com.google.common.annotations.VisibleForTesting;
+import org.apache.hadoop.classification.VisibleForTesting;
 import org.apache.hadoop.thirdparty.protobuf.BlockingService;
 
 /**
@@ -100,7 +108,7 @@ import org.apache.hadoop.thirdparty.protobuf.BlockingService;
  * router. It is created, started, and stopped by {@link Router}.
  */
 public class RouterAdminServer extends AbstractService
-    implements RouterAdminProtocol {
+    implements RouterAdminProtocol, RefreshCallQueueProtocol {
 
   private static final Logger LOG =
       LoggerFactory.getLogger(RouterAdminServer.class);
@@ -126,6 +134,7 @@ public class RouterAdminServer extends AbstractService
   private static boolean isPermissionEnabled;
   private boolean iStateStoreCache;
   private final long maxComponentLength;
+  private boolean mountTableCheckDestination;
 
   public RouterAdminServer(Configuration conf, Router router)
       throws IOException {
@@ -184,6 +193,9 @@ public class RouterAdminServer extends AbstractService
     this.maxComponentLength = (int) conf.getLongBytes(
         RBFConfigKeys.DFS_ROUTER_ADMIN_MAX_COMPONENT_LENGTH_KEY,
         RBFConfigKeys.DFS_ROUTER_ADMIN_MAX_COMPONENT_LENGTH_DEFAULT);
+    this.mountTableCheckDestination = conf.getBoolean(
+        RBFConfigKeys.DFS_ROUTER_ADMIN_MOUNT_CHECK_ENABLE,
+        RBFConfigKeys.DFS_ROUTER_ADMIN_MOUNT_CHECK_ENABLE_DEFAULT);
 
     GenericRefreshProtocolServerSideTranslatorPB genericRefreshXlator =
         new GenericRefreshProtocolServerSideTranslatorPB(this);
@@ -191,8 +203,18 @@ public class RouterAdminServer extends AbstractService
         GenericRefreshProtocolProtos.GenericRefreshProtocolService.
         newReflectiveBlockingService(genericRefreshXlator);
 
+    RefreshCallQueueProtocolServerSideTranslatorPB refreshCallQueueXlator =
+        new RefreshCallQueueProtocolServerSideTranslatorPB(this);
+    BlockingService refreshCallQueueService =
+        RefreshCallQueueProtocolProtos.RefreshCallQueueProtocolService.
+        newReflectiveBlockingService(refreshCallQueueXlator);
+
     DFSUtil.addPBProtocol(conf, GenericRefreshProtocolPB.class,
         genericRefreshService, adminServer);
+    DFSUtil.addPBProtocol(conf, RefreshCallQueueProtocolPB.class,
+        refreshCallQueueService, adminServer);
+
+    registerRefreshFairnessPolicyControllerHandler();
   }
 
   /**
@@ -326,6 +348,13 @@ public class RouterAdminServer extends AbstractService
     // Checks max component length limit.
     MountTable mountTable = request.getEntry();
     verifyMaxComponentLength(mountTable);
+    if (this.mountTableCheckDestination) {
+      List<String> nsIds = verifyFileInDestinations(mountTable);
+      if (!nsIds.isEmpty()) {
+        throw new IllegalArgumentException("File not found in downstream " +
+            "nameservices: " + StringUtils.join(",", nsIds));
+      }
+    }
     return getMountTableStore().addMountTableEntry(request);
   }
 
@@ -336,6 +365,13 @@ public class RouterAdminServer extends AbstractService
     MountTable oldEntry = null;
     // Checks max component length limit.
     verifyMaxComponentLength(updateEntry);
+    if (this.mountTableCheckDestination) {
+      List<String> nsIds = verifyFileInDestinations(updateEntry);
+      if (!nsIds.isEmpty()) {
+        throw new IllegalArgumentException("File not found in downstream " +
+            "nameservices: " + StringUtils.join(",", nsIds));
+      }
+    }
     if (this.router.getSubclusterResolver() instanceof MountTableResolver) {
       MountTableResolver mResolver =
           (MountTableResolver) this.router.getSubclusterResolver();
@@ -542,10 +578,31 @@ public class RouterAdminServer extends AbstractService
   @Override
   public GetDestinationResponse getDestination(
       GetDestinationRequest request) throws IOException {
+    RouterRpcServer rpcServer = this.router.getRpcServer();
+    List<RemoteLocation> locations =
+        rpcServer.getLocationsForPath(request.getSrcPath(), false);
+    List<String> nsIds = getDestinationNameServices(request, locations);
+    if (nsIds.isEmpty() && !locations.isEmpty()) {
+      String nsId = locations.get(0).getNameserviceId();
+      nsIds.add(nsId);
+    }
+    return GetDestinationResponse.newInstance(nsIds);
+  }
+
+  /**
+   * Get destination nameservices where the file in request exists.
+   *
+   * @param request request with src info.
+   * @param locations remote locations to check against.
+   * @return list of nameservices where the dest file was found
+   * @throws IOException
+   */
+  private List<String> getDestinationNameServices(
+      GetDestinationRequest request, List<RemoteLocation> locations)
+      throws IOException {
     final String src = request.getSrcPath();
     final List<String> nsIds = new ArrayList<>();
     RouterRpcServer rpcServer = this.router.getRpcServer();
-    List<RemoteLocation> locations = rpcServer.getLocationsForPath(src, false);
     RouterRpcClient rpcClient = rpcServer.getRPCClient();
     RemoteMethod method = new RemoteMethod("getFileInfo",
         new Class<?>[] {String.class}, new RemoteParam());
@@ -562,11 +619,35 @@ public class RouterAdminServer extends AbstractService
       LOG.error("Cannot get location for {}: {}",
           src, ioe.getMessage());
     }
-    if (nsIds.isEmpty() && !locations.isEmpty()) {
-      String nsId = locations.get(0).getNameserviceId();
-      nsIds.add(nsId);
+    return nsIds;
+  }
+
+  /**
+   * Verify the file exists in destination nameservices to avoid dangling
+   * mount points.
+   *
+   * @param entry the new mount points added, could be from add or update.
+   * @return destination nameservices where the file doesn't exist.
+   * @throws IOException unable to verify the file in destinations
+   */
+  public List<String> verifyFileInDestinations(MountTable entry)
+      throws IOException {
+    GetDestinationRequest request =
+        GetDestinationRequest.newInstance(entry.getSourcePath());
+    List<RemoteLocation> locations = entry.getDestinations();
+    List<String> nsId =
+        getDestinationNameServices(request, locations);
+
+    // get nameservices where no target file exists
+    Set<String> destNs = new HashSet<>(nsId);
+    List<String> nsWithoutFile = new ArrayList<>();
+    for (RemoteLocation location : locations) {
+      String ns = location.getNameserviceId();
+      if (!destNs.contains(ns)) {
+        nsWithoutFile.add(ns);
+      }
     }
-    return GetDestinationResponse.newInstance(nsIds);
+    return nsWithoutFile;
   }
 
   /**
@@ -698,5 +779,18 @@ public class RouterAdminServer extends AbstractService
   public boolean refreshSuperUserGroupsConfiguration() throws IOException {
     ProxyUsers.refreshSuperUserGroupsConfiguration();
     return true;
+  }
+
+  @Override // RefreshCallQueueProtocol
+  public void refreshCallQueue() throws IOException {
+    LOG.info("Refreshing call queue.");
+
+    Configuration configuration = new Configuration();
+    router.getRpcServer().getServer().refreshCallQueue(configuration);
+  }
+
+  private void registerRefreshFairnessPolicyControllerHandler() {
+    RefreshRegistry.defaultRegistry()
+        .register(HANDLER_IDENTIFIER, new RefreshFairnessPolicyControllerHandler(router));
   }
 }

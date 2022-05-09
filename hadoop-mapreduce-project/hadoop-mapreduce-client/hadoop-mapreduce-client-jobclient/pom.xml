@@ -93,6 +93,12 @@
       <artifactId>hadoop-hdfs</artifactId>
       <scope>test</scope>
       <type>test-jar</type>
+      <exclusions>
+        <exclusion>
+          <groupId>org.ow2.asm</groupId>
+          <artifactId>asm-commons</artifactId>
+        </exclusion>
+      </exclusions>
     </dependency>
     <dependency>
       <groupId>org.apache.hadoop</groupId>
@@ -183,6 +189,7 @@
           <excludes>
             <exclude>src/test/java/org/apache/hadoop/cli/data60bytes</exclude>
             <exclude>src/test/resources/job_1329348432655_0001-10.jhist</exclude>
+            <exclude>**/jobTokenPassword</exclude>
           </excludes>
         </configuration>
       </plugin>

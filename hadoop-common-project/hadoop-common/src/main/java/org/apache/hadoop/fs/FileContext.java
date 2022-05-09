@@ -64,14 +64,18 @@ import org.apache.hadoop.security.AccessControlException;
 import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.hadoop.security.token.Token;
 import org.apache.hadoop.util.ShutdownHookManager;
-
-import com.google.common.base.Preconditions;
-import com.google.common.annotations.VisibleForTesting;
-import org.apache.htrace.core.Tracer;
+import org.apache.hadoop.util.Preconditions;
+import org.apache.hadoop.classification.VisibleForTesting;
+import org.apache.hadoop.tracing.Tracer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import static org.apache.hadoop.fs.Options.OpenFileOptions.FS_OPTION_OPENFILE_BUFFER_SIZE;
+import static org.apache.hadoop.fs.Options.OpenFileOptions.FS_OPTION_OPENFILE_READ_POLICY;
+import static org.apache.hadoop.fs.Options.OpenFileOptions.FS_OPTION_OPENFILE_LENGTH;
+import static org.apache.hadoop.fs.Options.OpenFileOptions.FS_OPTION_OPENFILE_READ_POLICY_WHOLE_FILE;
 import static org.apache.hadoop.fs.impl.PathCapabilitiesSupport.validatePathCapabilityArgs;
+import static org.apache.hadoop.util.functional.FutureIO.awaitFuture;
 
 /**
  * The FileContext class provides an interface for users of the Hadoop
@@ -358,11 +362,6 @@ public class FileContext implements PathCapabilities {
     }
   }
   
-  /**
-   * Protected Static Factory methods for getting a FileContexts
-   * that take a AbstractFileSystem as input. To be used for testing.
-   */
-
   /**
    * Create a FileContext with specified FS as default using the specified
    * config.
@@ -1247,6 +1246,16 @@ public class FileContext implements PathCapabilities {
         return fs.getFileStatus(p);
       }
     }.resolve(this, absF);
+  }
+
+  /**
+   * Synchronize client metadata state.
+   *
+   * @throws IOException
+   * @throws UnsupportedOperationException
+   */
+  public void msync() throws IOException, UnsupportedOperationException {
+    defaultFS.msync();
   }
 
   /**
@@ -2194,7 +2203,12 @@ public class FileContext implements PathCapabilities {
         EnumSet<CreateFlag> createFlag = overwrite ? EnumSet.of(
             CreateFlag.CREATE, CreateFlag.OVERWRITE) :
             EnumSet.of(CreateFlag.CREATE);
-        InputStream in = open(qSrc);
+        InputStream in = awaitFuture(openFile(qSrc)
+            .opt(FS_OPTION_OPENFILE_READ_POLICY,
+                FS_OPTION_OPENFILE_READ_POLICY_WHOLE_FILE)
+            .opt(FS_OPTION_OPENFILE_LENGTH,
+                fs.getLen())   // file length hint for object stores
+            .build());
         try (OutputStream out = create(qDst, createFlag)) {
           IOUtils.copyBytes(in, out, conf, true);
         } finally {
@@ -2926,9 +2940,11 @@ public class FileContext implements PathCapabilities {
       final Path absF = fixRelativePart(getPath());
       OpenFileParameters parameters = new OpenFileParameters()
           .withMandatoryKeys(getMandatoryKeys())
+          .withOptionalKeys(getOptionalKeys())
           .withOptions(getOptions())
-          .withBufferSize(getBufferSize())
-          .withStatus(getStatus());
+          .withStatus(getStatus())
+          .withBufferSize(
+              getOptions().getInt(FS_OPTION_OPENFILE_BUFFER_SIZE, getBufferSize()));
       return new FSLinkResolver<CompletableFuture<FSDataInputStream>>() {
         @Override
         public CompletableFuture<FSDataInputStream> next(
@@ -2957,4 +2973,31 @@ public class FileContext implements PathCapabilities {
         (fs, p) -> fs.hasPathCapability(p, capability));
   }
 
+  /**
+   * Return a set of server default configuration values based on path.
+   * @param path path to fetch server defaults
+   * @return server default configuration values for path
+   * @throws IOException an I/O error occurred
+   */
+  public FsServerDefaults getServerDefaults(final Path path)
+      throws IOException {
+    return FsLinkResolution.resolve(this,
+        fixRelativePart(path),
+        (fs, p) -> fs.getServerDefaults(p));
+  }
+
+  /**
+   * Create a multipart uploader.
+   * @param basePath file path under which all files are uploaded
+   * @return a MultipartUploaderBuilder object to build the uploader
+   * @throws IOException if some early checks cause IO failures.
+   * @throws UnsupportedOperationException if support is checked early.
+   */
+  @InterfaceStability.Unstable
+  public MultipartUploaderBuilder createMultipartUploader(Path basePath)
+      throws IOException {
+    return FsLinkResolution.resolve(this,
+        fixRelativePart(basePath),
+        (fs, p) -> fs.createMultipartUploader(p));
+  }
 }

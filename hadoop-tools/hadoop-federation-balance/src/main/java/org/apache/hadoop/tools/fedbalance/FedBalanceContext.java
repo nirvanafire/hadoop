@@ -54,6 +54,8 @@ public class FedBalanceContext implements Writable {
   private TrashOption trashOpt;
   /* How long will the procedures be delayed. */
   private long delayDuration;
+  /* The threshold of diff entries. */
+  private int diffThreshold;
 
   private Configuration conf;
 
@@ -91,6 +93,10 @@ public class FedBalanceContext implements Writable {
     return bandwidthLimit;
   }
 
+  public int getDiffThreshold() {
+    return diffThreshold;
+  }
+
   public TrashOption getTrashOpt() {
     return trashOpt;
   }
@@ -107,6 +113,7 @@ public class FedBalanceContext implements Writable {
     out.writeInt(bandwidthLimit);
     out.writeInt(trashOpt.ordinal());
     out.writeLong(delayDuration);
+    out.writeInt(diffThreshold);
   }
 
   @Override
@@ -122,6 +129,7 @@ public class FedBalanceContext implements Writable {
     bandwidthLimit = in.readInt();
     trashOpt = TrashOption.values()[in.readInt()];
     delayDuration = in.readLong();
+    diffThreshold = in.readInt();
   }
 
   @Override
@@ -146,6 +154,7 @@ public class FedBalanceContext implements Writable {
         .append(bandwidthLimit, bc.bandwidthLimit)
         .append(trashOpt, bc.trashOpt)
         .append(delayDuration, bc.delayDuration)
+        .append(diffThreshold, bc.diffThreshold)
         .isEquals();
   }
 
@@ -161,29 +170,44 @@ public class FedBalanceContext implements Writable {
         .append(bandwidthLimit)
         .append(trashOpt)
         .append(delayDuration)
+        .append(diffThreshold)
         .build();
   }
 
   @Override
   public String toString() {
-    StringBuilder builder = new StringBuilder("FedBalance context:");
-    builder.append(" src=").append(src);
-    builder.append(", dst=").append(dst);
+    StringBuilder builder = new StringBuilder();
+    builder.append("Move ").append(src).append(" to ").append(dst);
     if (useMountReadOnly) {
-      builder.append(", router-mode=true");
-      builder.append(", mount-point=").append(mount);
+      builder.append(" using router mode, mount point=").append(mount)
+          .append(".");
     } else {
-      builder.append(", router-mode=false");
+      builder.append(" using normal federation mode.");
     }
-    builder.append(", forceCloseOpenFiles=").append(forceCloseOpenFiles);
-    builder.append(", trash=").append(trashOpt.name());
-    builder.append(", map=").append(mapNum);
-    builder.append(", bandwidth=").append(bandwidthLimit);
-    builder.append(", delayDuration=").append(delayDuration);
+    builder.append(" Submit distcp job with map=").append(mapNum)
+        .append(" and bandwidth=").append(bandwidthLimit).append(".");
+    builder.append(" When the diff count is no greater than ")
+        .append(diffThreshold);
+    if (forceCloseOpenFiles) {
+      builder.append(", force close all open files.");
+    } else {
+      builder.append(", wait until there is no open files.");
+    }
+    switch (trashOpt) {
+    case DELETE:
+      builder.append(" Delete the src after the job is complete.");
+      break;
+    case TRASH:
+      builder.append(" Move the src to trash after the job is complete.");
+      break;
+    default:
+      break;
+    }
+    builder.append(" Delay duration is ").append(delayDuration).append("ms.");
     return builder.toString();
   }
 
-  static class Builder {
+  public static class Builder {
     private final Path src;
     private final Path dst;
     private final String mount;
@@ -194,6 +218,7 @@ public class FedBalanceContext implements Writable {
     private int bandwidthLimit;
     private TrashOption trashOpt;
     private long delayDuration;
+    private int diffThreshold;
 
     /**
      * This class helps building the FedBalanceContext.
@@ -203,7 +228,7 @@ public class FedBalanceContext implements Writable {
      * @param mount the mount point to be balanced.
      * @param conf the configuration.
      */
-    Builder(Path src, Path dst, String mount, Configuration conf) {
+    public Builder(Path src, Path dst, String mount, Configuration conf) {
       this.src = src;
       this.dst = dst;
       this.mount = mount;
@@ -213,6 +238,7 @@ public class FedBalanceContext implements Writable {
     /**
      * Force close open files.
      * @param value true if force close all the open files.
+     * @return the builder.
      */
     public Builder setForceCloseOpenFiles(boolean value) {
       this.forceCloseOpenFiles = value;
@@ -222,6 +248,7 @@ public class FedBalanceContext implements Writable {
     /**
      * Use mount point readonly to disable write.
      * @param value true if disabling write by setting mount point readonly.
+     * @return the builder.
      */
     public Builder setUseMountReadOnly(boolean value) {
       this.useMountReadOnly = value;
@@ -231,6 +258,7 @@ public class FedBalanceContext implements Writable {
     /**
      * The map number of the distcp job.
      * @param value the map number of the distcp.
+     * @return the builder.
      */
     public Builder setMapNum(int value) {
       this.mapNum = value;
@@ -240,6 +268,7 @@ public class FedBalanceContext implements Writable {
     /**
      * The bandwidth limit of the distcp job(MB).
      * @param value the bandwidth.
+     * @return the builder.
      */
     public Builder setBandwidthLimit(int value) {
       this.bandwidthLimit = value;
@@ -249,7 +278,8 @@ public class FedBalanceContext implements Writable {
     /**
      * Specify the trash behaviour after all the data is sync to the target.
      * @param value the trash option.
-     * */
+     * @return the builder.
+     */
     public Builder setTrash(TrashOption value) {
       this.trashOpt = value;
       return this;
@@ -257,9 +287,21 @@ public class FedBalanceContext implements Writable {
 
     /**
      * Specify the delayed duration when the procedures need to retry.
+     * @param value the delay duration.
+     * @return the builder.
      */
     public Builder setDelayDuration(long value) {
       this.delayDuration = value;
+      return this;
+    }
+
+    /**
+     * Specify the threshold of diff entries.
+     * @param value the diff threshold.
+     * @return the builder.
+     */
+    public Builder setDiffThreshold(int value) {
+      this.diffThreshold = value;
       return this;
     }
 
@@ -280,6 +322,7 @@ public class FedBalanceContext implements Writable {
       context.bandwidthLimit = this.bandwidthLimit;
       context.trashOpt = this.trashOpt;
       context.delayDuration = this.delayDuration;
+      context.diffThreshold = this.diffThreshold;
       return context;
     }
   }

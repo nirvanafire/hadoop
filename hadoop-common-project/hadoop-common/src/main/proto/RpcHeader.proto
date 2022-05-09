@@ -18,7 +18,7 @@
 
 /**
  * These .proto interfaces are private and stable.
- * Please see http://wiki.apache.org/hadoop/Compatibility
+ * Please see https://hadoop.apache.org/docs/current/hadoop-project-dist/hadoop-common/Compatibility.html
  * for what changes are allowed for a *stable* .proto interface.
  */
 syntax = "proto2";
@@ -63,7 +63,7 @@ enum RpcKindProto {
 message RPCTraceInfoProto {
     optional int64 traceId = 1; // parentIdHigh
     optional int64 parentId = 2; // parentIdLow
-
+    optional bytes spanContext = 3; // Trace SpanContext
 }
 
 /**

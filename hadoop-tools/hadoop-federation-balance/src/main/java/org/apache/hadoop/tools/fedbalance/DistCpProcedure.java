@@ -17,7 +17,7 @@
  */
 package org.apache.hadoop.tools.fedbalance;
 
-import com.google.common.annotations.VisibleForTesting;
+import org.apache.hadoop.classification.VisibleForTesting;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.Path;
@@ -72,7 +72,7 @@ public class DistCpProcedure extends BalanceProcedure {
       LoggerFactory.getLogger(DistCpProcedure.class);
 
   /* Stages of this procedure. */
-  enum Stage {
+  public enum Stage {
     PRE_CHECK, INIT_DISTCP, DIFF_DISTCP, DISABLE_WRITE, FINAL_DISTCP, FINISH
   }
 
@@ -89,6 +89,8 @@ public class DistCpProcedure extends BalanceProcedure {
   private boolean forceCloseOpenFiles;
   /* Disable write by setting the mount point readonly. */
   private boolean useMountReadOnly;
+  /* The threshold of diff entries. */
+  private int diffThreshold;
 
   private FsPermission fPerm; // the permission of the src.
   private AclStatus acl; // the acl of the src.
@@ -109,6 +111,14 @@ public class DistCpProcedure extends BalanceProcedure {
    */
   @VisibleForTesting
   static boolean enabledForTest = false;
+
+  public static void enableForTest() {
+    enabledForTest = true;
+  }
+
+  public static void disableForTest() {
+    enabledForTest = false;
+  }
 
   public DistCpProcedure() {
   }
@@ -134,6 +144,7 @@ public class DistCpProcedure extends BalanceProcedure {
     this.bandWidth = context.getBandwidthLimit();
     this.forceCloseOpenFiles = context.getForceCloseOpenFiles();
     this.useMountReadOnly = context.getUseMountReadOnly();
+    this.diffThreshold = context.getDiffThreshold();
     srcFs = (DistributedFileSystem) context.getSrc().getFileSystem(conf);
     dstFs = (DistributedFileSystem) context.getDst().getFileSystem(conf);
   }
@@ -152,7 +163,7 @@ public class DistCpProcedure extends BalanceProcedure {
       diffDistCp();
       return false;
     case DISABLE_WRITE:
-      disableWrite();
+      disableWrite(context);
       return false;
     case FINAL_DISTCP:
       finalDistCp();
@@ -227,33 +238,34 @@ public class DistCpProcedure extends BalanceProcedure {
       } else {
         throw new RetryException(); // wait job complete.
       }
-    } else if (!verifyDiff()) {
-      if (!verifyOpenFiles() || forceCloseOpenFiles) {
-        updateStage(Stage.DISABLE_WRITE);
-      } else {
-        throw new RetryException();
-      }
+    } else if (diffDistCpStageDone()) {
+      updateStage(Stage.DISABLE_WRITE);
     } else {
       submitDiffDistCp();
     }
   }
 
   /**
-   * Disable write either by making the mount entry readonly or cancelling the
-   * execute permission of the source path.
+   * Disable write by cancelling the execute permission of the source path.
+   * TODO: Disable the super user from writing.
+   * @param fbcontext the context.
+   * @throws IOException if can't disable write.
    */
-  void disableWrite() throws IOException {
-    if (useMountReadOnly) {
-      String mount = context.getMount();
-      MountTableProcedure.disableWrite(mount, conf);
-    } else {
-      // Save and cancel permission.
-      FileStatus status = srcFs.getFileStatus(src);
-      fPerm = status.getPermission();
-      acl = srcFs.getAclStatus(src);
-      srcFs.setPermission(src, FsPermission.createImmutable((short) 0));
-    }
+  protected void disableWrite(FedBalanceContext fbcontext) throws IOException {
+    // Save and cancel permission.
+    FileStatus status = srcFs.getFileStatus(src);
+    fPerm = status.getPermission();
+    acl = srcFs.getAclStatus(src);
+    srcFs.setPermission(src, FsPermission.createImmutable((short) 0));
     updateStage(Stage.FINAL_DISTCP);
+  }
+
+  /**
+   * Enable write.
+   * @throws IOException if can't enable write.
+   */
+  protected void enableWrite() throws IOException {
+    restorePermission();
   }
 
   /**
@@ -298,9 +310,7 @@ public class DistCpProcedure extends BalanceProcedure {
   }
 
   void finish() throws IOException {
-    if (!useMountReadOnly) {
-      restorePermission();
-    }
+    enableWrite();
     if (srcFs.exists(src)) {
       cleanupSnapshot(srcFs, src);
     }
@@ -315,7 +325,7 @@ public class DistCpProcedure extends BalanceProcedure {
   }
 
   @VisibleForTesting
-  void updateStage(Stage value) {
+  protected void updateStage(Stage value) {
     String oldStage = stage == null ? "null" : stage.name();
     String newStage = value == null ? "null" : value.name();
     LOG.info("Stage updated from {} to {}.", oldStage, newStage);
@@ -372,14 +382,38 @@ public class DistCpProcedure extends BalanceProcedure {
   }
 
   /**
-   * Verify whether the src has changed since CURRENT_SNAPSHOT_NAME snapshot.
+   * Check whether the conditions are satisfied for moving to the next stage.
+   * If the diff entries size is no greater than the threshold and the open
+   * files could be force closed or there is no open file, then moving to the
+   * next stage.
    *
-   * @return true if the src has changed.
+   * @return true if moving to the next stage. false if the conditions are not
+   * satisfied.
+   * @throws RetryException if the conditions are not satisfied and the diff
+   * size is under the given threshold scope.
    */
-  private boolean verifyDiff() throws IOException {
+  @VisibleForTesting
+  boolean diffDistCpStageDone() throws IOException, RetryException {
+    int diffSize = getDiffSize();
+    if (diffSize <= diffThreshold) {
+      if (forceCloseOpenFiles || !verifyOpenFiles()) {
+        return true;
+      } else {
+        throw new RetryException();
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Get number of the diff entries.
+   *
+   * @return number of the diff entries.
+   */
+  private int getDiffSize() throws IOException {
     SnapshotDiffReport diffReport =
         srcFs.getSnapshotDiffReport(src, CURRENT_SNAPSHOT_NAME, "");
-    return diffReport.getDiffList().size() > 0;
+    return diffReport.getDiffList().size();
   }
 
   /**
