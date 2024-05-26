@@ -29,6 +29,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.EnumSet;
 import java.util.List;
+import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.function.IntFunction;
@@ -52,9 +53,9 @@ import org.apache.hadoop.util.LambdaUtils;
 import org.apache.hadoop.util.Progressable;
 
 import static org.apache.hadoop.fs.Options.OpenFileOptions.FS_OPTION_OPENFILE_STANDARD_OPTIONS;
+import static org.apache.hadoop.fs.VectoredReadUtils.validateAndSortRanges;
 import static org.apache.hadoop.fs.impl.PathCapabilitiesSupport.validatePathCapabilityArgs;
 import static org.apache.hadoop.fs.impl.StoreImplementationUtils.isProbeForSyncable;
-import static org.apache.hadoop.fs.VectoredReadUtils.sortRanges;
 
 /****************************************************************
  * Abstract Checksumed FileSystem.
@@ -174,6 +175,7 @@ public abstract class ChecksumFileSystem extends FilterFileSystem {
     private static final int HEADER_LENGTH = 8;
 
     private int bytesPerSum = 1;
+    private long fileLen = -1L;
 
     public ChecksumFSInputChecker(ChecksumFileSystem fs, Path file)
       throws IOException {
@@ -321,6 +323,18 @@ public abstract class ChecksumFileSystem extends FilterFileSystem {
     }
 
     /**
+     * Calculate length of file if not already cached.
+     * @return file length.
+     * @throws IOException any IOE.
+     */
+    private long getFileLength() throws IOException {
+      if (fileLen == -1L) {
+        fileLen = fs.getFileStatus(file).getLen();
+      }
+      return fileLen;
+    }
+
+    /**
      * Find the checksum ranges that correspond to the given data ranges.
      * @param dataRanges the input data ranges, which are assumed to be sorted
      *                   and non-overlapping
@@ -371,13 +385,28 @@ public abstract class ChecksumFileSystem extends FilterFileSystem {
       IntBuffer sums = sumsBytes.asIntBuffer();
       sums.position(offset / FSInputChecker.CHECKSUM_SIZE);
       ByteBuffer current = data.duplicate();
-      int numChunks = data.remaining() / bytesPerSum;
+      int numFullChunks = data.remaining() / bytesPerSum;
+      boolean partialChunk = ((data.remaining() % bytesPerSum) != 0);
+      int totalChunks = numFullChunks;
+      if (partialChunk) {
+        totalChunks++;
+      }
       CRC32 crc = new CRC32();
       // check each chunk to ensure they match
-      for(int c = 0; c < numChunks; ++c) {
-        // set the buffer position and the limit
-        current.limit((c + 1) * bytesPerSum);
+      for(int c = 0; c < totalChunks; ++c) {
+        // set the buffer position to the start of every chunk.
         current.position(c * bytesPerSum);
+
+        if (c == numFullChunks) {
+          // During last chunk, there may be less than chunk size
+          // data preset, so setting the limit accordingly.
+          int lastIncompleteChunk = data.remaining() % bytesPerSum;
+          current.limit((c * bytesPerSum) + lastIncompleteChunk);
+        } else {
+          // set the buffer limit to end of every chunk.
+          current.limit((c + 1) * bytesPerSum);
+        }
+
         // compute the crc
         crc.reset();
         crc.update(current);
@@ -396,29 +425,45 @@ public abstract class ChecksumFileSystem extends FilterFileSystem {
       return data;
     }
 
+    /**
+     * Vectored read.
+     * If the file has no checksums: delegate to the underlying stream.
+     * If the file is checksummed: calculate the checksum ranges as
+     * well as the data ranges, read both, and validate the checksums
+     * as well as returning the data.
+     * @param ranges the byte ranges to read
+     * @param allocate the function to allocate ByteBuffer
+     * @throws IOException
+     */
     @Override
     public void readVectored(List<? extends FileRange> ranges,
                              IntFunction<ByteBuffer> allocate) throws IOException {
+
       // If the stream doesn't have checksums, just delegate.
-      VectoredReadUtils.validateVectoredReadRanges(ranges);
       if (sums == null) {
         datas.readVectored(ranges, allocate);
         return;
       }
+      final long length = getFileLength();
+      final List<? extends FileRange> sorted = validateAndSortRanges(ranges,
+          Optional.of(length));
       int minSeek = minSeekForVectorReads();
       int maxSize = maxReadSizeForVectorReads();
       List<CombinedFileRange> dataRanges =
-          VectoredReadUtils.mergeSortedRanges(Arrays.asList(sortRanges(ranges)), bytesPerSum,
+          VectoredReadUtils.mergeSortedRanges(sorted, bytesPerSum,
               minSeek, maxReadSizeForVectorReads());
+      // While merging the ranges above, they are rounded up based on the value of bytesPerSum
+      // which leads to some ranges crossing the EOF thus they need to be fixed else it will
+      // cause EOFException during actual reads.
+      for (CombinedFileRange range : dataRanges) {
+        if (range.getOffset() + range.getLength() > length) {
+          range.setLength((int) (length - range.getOffset()));
+        }
+      }
       List<CombinedFileRange> checksumRanges = findChecksumRanges(dataRanges,
           bytesPerSum, minSeek, maxSize);
       sums.readVectored(checksumRanges, allocate);
       datas.readVectored(dataRanges, allocate);
-      // Data read is correct. I have verified content of dataRanges.
-      // There is some bug below here as test (testVectoredReadMultipleRanges)
-      // is failing, should be
-      // somewhere while slicing the merged data into smaller user ranges.
-      // Spend some time figuring out but it is a complex code.
       for(CombinedFileRange checksumRange: checksumRanges) {
         for(FileRange dataRange: checksumRange.getUnderlying()) {
           // when we have both the ranges, validate the checksum

@@ -46,8 +46,9 @@ import org.slf4j.LoggerFactory;
  * The fencing methods that ship with Hadoop may also be referred to
  * by shortened names:<br>
  * <ul>
- * <li><code>shell(/path/to/some/script.sh args...)</code></li>
+ * <li><code>shell(/path/to/some/script.sh args...)</code> (see {@link ShellCommandFencer})
  * <li><code>sshfence(...)</code> (see {@link SshFenceByTcpPort})
+ * <li><code>powershell(...)</code> (see {@link PowerShellFencer})
  * </ul>
  */
 @InterfaceAudience.Private

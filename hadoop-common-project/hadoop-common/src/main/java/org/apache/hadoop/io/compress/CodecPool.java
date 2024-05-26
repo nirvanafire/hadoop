@@ -25,6 +25,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
+import org.apache.hadoop.conf.Configurable;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.util.ReflectionUtils;
 
@@ -152,6 +153,9 @@ public class CodecPool {
       compressor = codec.createCompressor();
       LOG.info("Got brand-new compressor ["+codec.getDefaultExtension()+"]");
     } else {
+      if (conf == null && codec instanceof Configurable) {
+        conf = ((Configurable)codec).getConf();
+      }
       compressor.reinit(conf);
       if(LOG.isDebugEnabled()) {
         LOG.debug("Got recycled compressor");
@@ -205,6 +209,7 @@ public class CodecPool {
     }
     // if the compressor can't be reused, don't pool it.
     if (compressor.getClass().isAnnotationPresent(DoNotPool.class)) {
+      compressor.end();
       return;
     }
     compressor.reset();
@@ -225,6 +230,7 @@ public class CodecPool {
     }
     // if the decompressor can't be reused, don't pool it.
     if (decompressor.getClass().isAnnotationPresent(DoNotPool.class)) {
+      decompressor.end();
       return;
     }
     decompressor.reset();

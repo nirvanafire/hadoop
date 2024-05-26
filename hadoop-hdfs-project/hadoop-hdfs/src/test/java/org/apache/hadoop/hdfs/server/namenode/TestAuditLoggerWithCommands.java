@@ -33,6 +33,7 @@ import org.apache.hadoop.hdfs.protocol.CacheDirectiveInfo;
 import org.apache.hadoop.hdfs.protocol.CachePoolEntry;
 import org.apache.hadoop.hdfs.protocol.CachePoolInfo;
 import org.apache.hadoop.hdfs.protocol.HdfsConstants;
+import org.apache.hadoop.hdfs.protocol.LocatedBlock;
 import org.apache.hadoop.hdfs.server.protocol.DatanodeStorageReport;
 import org.apache.hadoop.hdfs.server.protocol.NamenodeProtocols;
 import org.apache.hadoop.ipc.RPC;
@@ -93,7 +94,7 @@ public class TestAuditLoggerWithCommands {
     user2 =
         UserGroupInformation.createUserForTesting("theEngineer",
             new String[]{"hadoop"});
-    auditlog = LogCapturer.captureLogs(FSNamesystem.auditLog);
+    auditlog = LogCapturer.captureLogs(FSNamesystem.AUDIT_LOG);
     proto = cluster.getNameNodeRpc();
     fileSys = DFSTestUtil.getFileSystemAs(user1, conf);
     fs2 = DFSTestUtil.getFileSystemAs(user2, conf);
@@ -1216,6 +1217,25 @@ public class TestAuditLoggerWithCommands {
     String aceDeletePattern =
         ".*allowed=false.*ugi=theDoctor.*cmd=delete.*";
     verifyAuditLogs(aceDeletePattern);
+  }
+
+  @Test
+  public void testReportBadBlocks() throws IOException {
+    String auditLogString =
+            ".*allowed=true.*cmd=reportBadBlocks.*";
+    FSNamesystem fsNamesystem = spy(cluster.getNamesystem());
+    when(fsNamesystem.isExternalInvocation()).thenReturn(true);
+    Server.Call call = spy(new Server.Call(
+            1, 1, null, null, RPC.RpcKind.RPC_BUILTIN, new byte[] {1, 2, 3}));
+    when(call.getRemoteUser()).thenReturn(
+            UserGroupInformation.createRemoteUser(System.getProperty("user.name")));
+    Server.getCurCall().set(call);
+    try {
+      cluster.getNameNodeRpc().reportBadBlocks(new LocatedBlock[]{});
+      verifyAuditLogs(auditLogString);
+    } catch (Exception e) {
+      fail(" The operation threw an exception" + e);
+    }
   }
 
   private void verifyAuditRestoreFailedStorageACE(

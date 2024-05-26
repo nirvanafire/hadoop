@@ -66,6 +66,7 @@ import java.io.IOException;
 import java.io.InputStreamReader;
 import java.net.InetSocketAddress;
 import java.net.URI;
+import java.nio.charset.StandardCharsets;
 import java.text.DateFormat;
 import java.util.*;
 import java.util.concurrent.TimeUnit;
@@ -724,12 +725,12 @@ public class Mover {
 
     private static Options buildCliOptions() {
       Options opts = new Options();
-      Option file = OptionBuilder.withArgName("pathsFile").hasArg()
-          .withDescription("a local file containing files/dirs to migrate")
-          .create("f");
-      Option paths = OptionBuilder.withArgName("paths").hasArgs()
-          .withDescription("specify space separated files/dirs to migrate")
-          .create("p");
+      Option file = Option.builder("f").argName("pathsFile").hasArg()
+          .desc("a local file containing files/dirs to migrate")
+          .build();
+      Option paths = Option.builder("p").argName("paths").hasArgs()
+          .desc("specify space separated files/dirs to migrate")
+          .build();
       OptionGroup group = new OptionGroup();
       group.addOption(file);
       group.addOption(paths);
@@ -740,7 +741,7 @@ public class Mover {
     private static String[] readPathFile(String file) throws IOException {
       List<String> list = Lists.newArrayList();
       BufferedReader reader = new BufferedReader(
-          new InputStreamReader(new FileInputStream(file), "UTF-8"));
+          new InputStreamReader(new FileInputStream(file), StandardCharsets.UTF_8));
       try {
         String line;
         while ((line = reader.readLine()) != null) {

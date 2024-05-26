@@ -1911,7 +1911,7 @@ function hadoop_start_secure_daemon
   if [[ ! -f "${jsvc}" ]]; then
     hadoop_error "JSVC_HOME is not set or set incorrectly. jsvc is required to run secure"
     hadoop_error "or privileged daemons. Please download and install jsvc from "
-    hadoop_error "http://archive.apache.org/dist/commons/daemon/binaries/ "
+    hadoop_error "https://downloads.apache.org/commons/daemon/binaries/ "
     hadoop_error "and set JSVC_HOME to the directory containing the jsvc binary."
     exit 1
   fi
@@ -2192,6 +2192,13 @@ function hadoop_daemon_handler
   case ${daemonmode} in
     status)
       hadoop_status_daemon "${daemon_pidfile}"
+      if [[ $? == 0 ]]; then
+        echo "${daemonname} is running as process $(cat "${daemon_pidfile}")."
+      elif [[ $? == 1 ]]; then
+        echo "${daemonname} is stopped."
+      else
+        hadoop_error "hadoop_status_daemon error."
+      fi
       exit $?
     ;;
 

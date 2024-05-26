@@ -25,6 +25,7 @@ import java.net.URISyntaxException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
+import java.util.HashMap;
 import java.util.Iterator;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -39,6 +40,7 @@ import org.apache.commons.lang3.SystemUtils;
 import org.apache.commons.lang3.time.FastDateFormat;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
+import org.apache.hadoop.classification.VisibleForTesting;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.net.NetUtils;
 import org.apache.log4j.LogManager;
@@ -77,6 +79,18 @@ public class StringUtils {
    */
   public static final Pattern ENV_VAR_PATTERN = Shell.WINDOWS ?
     WIN_ENV_VAR_PATTERN : SHELL_ENV_VAR_PATTERN;
+
+  /**
+   * {@link #getTrimmedStringCollectionSplitByEquals(String)} throws
+   * {@link IllegalArgumentException} with error message starting with this string
+   * if the argument provided is not valid representation of non-empty key-value
+   * pairs.
+   * Value = {@value}
+   */
+  @VisibleForTesting
+  public static final String STRING_COLLECTION_SPLIT_EQUALS_INVALID_ARG =
+      "Trimmed string split by equals does not correctly represent "
+          + "non-empty key-value pairs.";
 
   /**
    * Make a string representation of the exception.
@@ -479,7 +493,37 @@ public class StringUtils {
     set.remove("");
     return set;
   }
-  
+
+  /**
+   * Splits an "=" separated value <code>String</code>, trimming leading and
+   * trailing whitespace on each value after splitting by comma and new line separator.
+   *
+   * @param str a comma separated <code>String</code> with values, may be null
+   * @return a <code>Map</code> of <code>String</code> keys and values, empty
+   * Collection if null String input.
+   */
+  public static Map<String, String> getTrimmedStringCollectionSplitByEquals(
+      String str) {
+    String[] trimmedList = getTrimmedStrings(str);
+    Map<String, String> pairs = new HashMap<>();
+    for (String s : trimmedList) {
+      if (s.isEmpty()) {
+        continue;
+      }
+      String[] splitByKeyVal = getTrimmedStringsSplitByEquals(s);
+      Preconditions.checkArgument(
+          splitByKeyVal.length == 2,
+          STRING_COLLECTION_SPLIT_EQUALS_INVALID_ARG + " Input: " + str);
+      boolean emptyKey = org.apache.commons.lang3.StringUtils.isEmpty(splitByKeyVal[0]);
+      boolean emptyVal = org.apache.commons.lang3.StringUtils.isEmpty(splitByKeyVal[1]);
+      Preconditions.checkArgument(
+          !emptyKey && !emptyVal,
+          STRING_COLLECTION_SPLIT_EQUALS_INVALID_ARG + " Input: " + str);
+      pairs.put(splitByKeyVal[0], splitByKeyVal[1]);
+    }
+    return pairs;
+  }
+
   /**
    * Splits a comma or newline separated value <code>String</code>, trimming
    * leading and trailing whitespace on each value.
@@ -495,6 +539,22 @@ public class StringUtils {
     }
 
     return str.trim().split("\\s*[,\n]\\s*");
+  }
+
+  /**
+   * Splits "=" separated value <code>String</code>, trimming
+   * leading and trailing whitespace on each value.
+   *
+   * @param str an "=" separated <code>String</code> with values,
+   *            may be null
+   * @return an array of <code>String</code> values, empty array if null String
+   *         input
+   */
+  public static String[] getTrimmedStringsSplitByEquals(String str){
+    if (null == str || str.trim().isEmpty()) {
+      return emptyStringArray;
+    }
+    return str.trim().split("\\s*=\\s*");
   }
 
   final public static String[] emptyStringArray = {};
@@ -740,42 +800,26 @@ public class StringUtils {
    * Print a log message for starting up and shutting down
    * @param clazz the class of the server
    * @param args arguments
-   * @param LOG the target log object
+   * @param log the target log object
    */
   public static void startupShutdownMessage(Class<?> clazz, String[] args,
-                                     final org.apache.commons.logging.Log LOG) {
-    startupShutdownMessage(clazz, args, LogAdapter.create(LOG));
-  }
-
-  /**
-   * Print a log message for starting up and shutting down
-   * @param clazz the class of the server
-   * @param args arguments
-   * @param LOG the target log object
-   */
-  public static void startupShutdownMessage(Class<?> clazz, String[] args,
-                                     final org.slf4j.Logger LOG) {
-    startupShutdownMessage(clazz, args, LogAdapter.create(LOG));
-  }
-
-  static void startupShutdownMessage(Class<?> clazz, String[] args,
-                                     final LogAdapter LOG) { 
+                                     final org.slf4j.Logger log) {
     final String hostname = NetUtils.getHostname();
     final String classname = clazz.getSimpleName();
-    LOG.info(createStartupShutdownMessage(classname, hostname, args));
+    log.info(createStartupShutdownMessage(classname, hostname, args));
 
     if (SystemUtils.IS_OS_UNIX) {
       try {
-        SignalLogger.INSTANCE.register(LOG);
+        SignalLogger.INSTANCE.register(log);
       } catch (Throwable t) {
-        LOG.warn("failed to register any UNIX signal loggers: ", t);
+        log.warn("failed to register any UNIX signal loggers: ", t);
       }
     }
     ShutdownHookManager.get().addShutdownHook(
       new Runnable() {
         @Override
         public void run() {
-          LOG.info(toStartupShutdownString("SHUTDOWN_MSG: ", new String[]{
+          log.info(toStartupShutdownString("SHUTDOWN_MSG: ", new String[]{
             "Shutting down " + classname + " at " + hostname}));
           LogManager.shutdown();
         }
@@ -1100,6 +1144,19 @@ public class StringUtils {
     StringBuilder str = new StringBuilder();
     for (StackTraceElement e : stackTrace) {
       str.append(e.toString() + "\n");
+    }
+    return str.toString();
+  }
+
+  /**
+   * Get stack trace from throwable exception.
+   * @param t Throwable.
+   * @return stack trace string.
+   */
+  public static String getStackTrace(Throwable t) {
+    StringBuilder str = new StringBuilder();
+    for (StackTraceElement e : t.getStackTrace()) {
+      str.append(e.toString() + "\n\t");
     }
     return str.toString();
   }

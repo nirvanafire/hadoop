@@ -37,8 +37,6 @@ import java.util.Set;
 
 import javax.ws.rs.core.MediaType;
 
-import mockit.Mock;
-import mockit.MockUp;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.hadoop.yarn.api.records.ApplicationId;
@@ -54,7 +52,6 @@ import org.apache.hadoop.yarn.api.records.timelineservice.TimelineMetric;
 import org.apache.hadoop.yarn.api.records.timelineservice.TimelineMetric.Type;
 import org.apache.hadoop.yarn.server.metrics.ApplicationMetricsConstants;
 import org.apache.hadoop.yarn.server.timelineservice.collector.TimelineCollectorContext;
-import org.apache.hadoop.yarn.server.timelineservice.metrics.TimelineReaderMetrics;
 import org.apache.hadoop.yarn.server.timelineservice.storage.HBaseTimelineWriterImpl;
 import org.apache.hadoop.yarn.server.timelineservice.storage.common.HBaseTimelineSchemaUtils;
 import org.apache.hadoop.yarn.server.utils.BuilderUtils;
@@ -77,17 +74,9 @@ public class TestTimelineReaderWebServicesHBaseStorage
   private static long dayTs =
       HBaseTimelineSchemaUtils.getTopOfTheDayTimestamp(ts);
   private static String doAsUser = "remoteuser";
-  private static final DummyTimelineReaderMetrics METRICS
-      = new DummyTimelineReaderMetrics();
 
   @BeforeClass
   public static void setupBeforeClass() throws Exception {
-    new MockUp<TimelineReaderMetrics>() {
-      @Mock
-      public TimelineReaderMetrics getInstance() {
-        return METRICS;
-      }
-    };
     setup();
     loadData();
     initialize();
@@ -2606,6 +2595,22 @@ public class TestTimelineReaderWebServicesHBaseStorage
           "apps?fields=ALL&metricslimit=100&metricstimestart=" +
           (ts - 100000) + "&metricstimeend=" + (ts - 200000));
       verifyHttpResponse(client, uri, Status.BAD_REQUEST);
+    } finally {
+      client.destroy();
+    }
+  }
+
+  @Test
+  public void testGetEntityWithSystemEntityType() throws Exception {
+    Client client = createClient();
+    try {
+      URI uri = URI.create("http://localhost:" + getServerPort() + "/ws/v2/" +
+          "timeline/apps/application_1111111111_1111/" +
+          "entities/YARN_APPLICATION");
+      ClientResponse resp = getResponse(client, uri);
+      Set<TimelineEntity> entities =
+          resp.getEntity(new GenericType<Set<TimelineEntity>>(){});
+      assertEquals(0, entities.size());
     } finally {
       client.destroy();
     }

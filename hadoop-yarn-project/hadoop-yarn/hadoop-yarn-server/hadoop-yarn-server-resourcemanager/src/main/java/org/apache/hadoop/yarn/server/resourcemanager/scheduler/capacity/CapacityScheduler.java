@@ -455,6 +455,7 @@ public class CapacityScheduler extends
         reinitializeQueues(this.conf);
       } catch (Throwable t) {
         this.conf = oldConf;
+        reinitializeQueues(this.conf);
         refreshMaximumAllocation(
             ResourceUtils.fetchMaximumAllocationFromConfig(this.conf));
         throw new IOException("Failed to re-init queues : " + t.getMessage(),
@@ -2096,7 +2097,7 @@ public class CapacityScheduler extends
     {
       QueueManagementChangeEvent queueManagementChangeEvent =
           (QueueManagementChangeEvent) event;
-      ParentQueue parentQueue = queueManagementChangeEvent.getParentQueue();
+      AbstractParentQueue parentQueue = queueManagementChangeEvent.getParentQueue();
       try {
         final List<QueueManagementChange> queueManagementChanges =
             queueManagementChangeEvent.getQueueManagementChanges();
@@ -2536,7 +2537,7 @@ public class CapacityScheduler extends
         if (queue == null) {
           // reservation has terminated during failover
           if (isRecovering && conf.getMoveOnExpiry(
-              getQueue(queueName).getQueuePath())) {
+              getQueue(queueName).getQueuePathObject())) {
             // move to the default child queue of the plan
             return getDefaultReservationQueueName(queueName);
           }
@@ -2724,7 +2725,7 @@ public class CapacityScheduler extends
       application.setQueue(dest);
       LOG.info("App: " + appId + " successfully moved from " + sourceQueueName
           + " to: " + destQueueName);
-      return targetQueueName;
+      return dest.getQueuePath();
     } finally {
       writeLock.unlock();
     }

@@ -52,9 +52,33 @@ public class TestLocalFSContractVectoredRead extends AbstractContractVectoredRea
 
   @Test
   public void testChecksumValidationDuringVectoredRead() throws Exception {
-    Path testPath = path("big_range_checksum");
+    Path testPath = path("big_range_checksum_file");
+    List<FileRange> someRandomRanges = new ArrayList<>();
+    someRandomRanges.add(FileRange.createFileRange(10, 1024));
+    someRandomRanges.add(FileRange.createFileRange(1040, 1024));
+    validateCheckReadException(testPath, DATASET_LEN, someRandomRanges);
+  }
+
+
+  /**
+   * Test for file size less than checksum chunk size.
+   * {@code ChecksumFileSystem#bytesPerChecksum}.
+   */
+  @Test
+  public void testChecksumValidationDuringVectoredReadSmallFile() throws Exception {
+    Path testPath = path("big_range_checksum_file");
+    final int length = 471;
+    List<FileRange> smallFileRanges = new ArrayList<>();
+    smallFileRanges.add(FileRange.createFileRange(10, 50));
+    smallFileRanges.add(FileRange.createFileRange(100, 20));
+    validateCheckReadException(testPath, length, smallFileRanges);
+  }
+
+  private void validateCheckReadException(Path testPath,
+                                          int length,
+                                          List<FileRange> ranges) throws Exception {
     LocalFileSystem localFs = (LocalFileSystem) getFileSystem();
-    final byte[] datasetCorrect = ContractTestUtils.dataset(DATASET_LEN, 'a', 32);
+    final byte[] datasetCorrect = ContractTestUtils.dataset(length, 'a', 32);
     try (FSDataOutputStream out = localFs.create(testPath, true)){
       out.write(datasetCorrect);
     }
@@ -63,24 +87,43 @@ public class TestLocalFSContractVectoredRead extends AbstractContractVectoredRea
             .describedAs("Checksum file should be present")
             .isTrue();
     CompletableFuture<FSDataInputStream> fis = localFs.openFile(testPath).build();
-    List<FileRange> someRandomRanges = new ArrayList<>();
-    someRandomRanges.add(FileRange.createFileRange(10, 1024));
-    someRandomRanges.add(FileRange.createFileRange(1025, 1024));
     try (FSDataInputStream in = fis.get()){
-      in.readVectored(someRandomRanges, getAllocate());
-      validateVectoredReadResult(someRandomRanges, datasetCorrect);
+      in.readVectored(ranges, getAllocate());
+      validateVectoredReadResult(ranges, datasetCorrect, 0);
     }
-    final byte[] datasetCorrupted = ContractTestUtils.dataset(DATASET_LEN, 'a', 64);
+    final byte[] datasetCorrupted = ContractTestUtils.dataset(length, 'a', 64);
     try (FSDataOutputStream out = localFs.getRaw().create(testPath, true)){
       out.write(datasetCorrupted);
     }
     CompletableFuture<FSDataInputStream> fisN = localFs.openFile(testPath).build();
     try (FSDataInputStream in = fisN.get()){
-      in.readVectored(someRandomRanges, getAllocate());
+      in.readVectored(ranges, getAllocate());
       // Expect checksum exception when data is updated directly through
       // raw local fs instance.
       intercept(ChecksumException.class,
-          () -> validateVectoredReadResult(someRandomRanges, datasetCorrupted));
+          () -> validateVectoredReadResult(ranges, datasetCorrupted, 0));
     }
   }
+  @Test
+  public void tesChecksumVectoredReadBoundaries() throws Exception {
+    Path testPath = path("boundary_range_checksum_file");
+    final int length = 1071;
+    LocalFileSystem localFs = (LocalFileSystem) getFileSystem();
+    final byte[] datasetCorrect = ContractTestUtils.dataset(length, 'a', 32);
+    try (FSDataOutputStream out = localFs.create(testPath, true)){
+      out.write(datasetCorrect);
+    }
+    Path checksumPath = localFs.getChecksumFile(testPath);
+    Assertions.assertThat(localFs.exists(checksumPath))
+            .describedAs("Checksum file should be present at {} ", checksumPath)
+            .isTrue();
+    CompletableFuture<FSDataInputStream> fis = localFs.openFile(testPath).build();
+    List<FileRange> smallRange = new ArrayList<>();
+    smallRange.add(FileRange.createFileRange(1000, 71));
+    try (FSDataInputStream in = fis.get()){
+      in.readVectored(smallRange, getAllocate());
+      validateVectoredReadResult(smallRange, datasetCorrect, 0);
+    }
+  }
+
 }

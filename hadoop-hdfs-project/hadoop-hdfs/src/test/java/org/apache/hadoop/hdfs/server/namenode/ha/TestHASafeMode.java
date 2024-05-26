@@ -852,13 +852,13 @@ public class TestHASafeMode {
           null);
       create.write(testData.getBytes());
       create.hflush();
-      long fileId = ((DFSOutputStream)create.
-          getWrappedStream()).getFileId();
+      String renewLeaseKey = ((DFSOutputStream)create.
+          getWrappedStream()).getUniqKey();
       FileStatus fileStatus = dfs.getFileStatus(filePath);
       DFSClient client = DFSClientAdapter.getClient(dfs);
       // add one dummy block at NN, but not write to DataNode
       ExtendedBlock previousBlock =
-          DFSClientAdapter.getPreviousBlock(client, fileId);
+          DFSClientAdapter.getPreviousBlock(client, renewLeaseKey);
       DFSClientAdapter.getNamenode(client).addBlock(
           pathString,
           client.getClientName(),
@@ -976,5 +976,34 @@ public class TestHASafeMode {
           "NameNode still not leave safemode",
           () -> miniCluster.transitionToActive(0));
     }
+  }
+
+  @Test
+  public void testTransitionToObserverWhenSafeMode() throws Exception {
+    Configuration config = new Configuration();
+    config.setBoolean(DFS_HA_NN_NOT_BECOME_ACTIVE_IN_SAFEMODE, true);
+    try (MiniDFSCluster miniCluster = new MiniDFSCluster.Builder(config,
+        new File(GenericTestUtils.getRandomizedTempPath()))
+        .nnTopology(MiniDFSNNTopology.simpleHATopology())
+        .numDataNodes(1)
+        .build()) {
+      miniCluster.waitActive();
+      miniCluster.transitionToStandby(0);
+      miniCluster.transitionToStandby(1);
+      NameNode namenode0 = miniCluster.getNameNode(0);
+      NameNode namenode1 = miniCluster.getNameNode(1);
+      NameNodeAdapter.enterSafeMode(namenode0, false);
+      NameNodeAdapter.enterSafeMode(namenode1, false);
+      LambdaTestUtils.intercept(ServiceFailedException.class,
+          "NameNode still not leave safemode",
+          () -> miniCluster.transitionToObserver(0));
+    }
+  }
+
+  @Test
+  public void testTransitionToStandbyWhenSafeModeWithResourcesLow() throws Exception {
+    NameNodeAdapter.enterSafeMode(nn0, true);
+    cluster.transitionToStandby(0);
+    assertFalse("SNN should not enter safe mode when resources low", nn0.isInSafeMode());
   }
 }
