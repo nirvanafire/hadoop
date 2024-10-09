@@ -95,6 +95,11 @@ public final class Constants {
       "fs.s3a.assumed.role.arn";
 
   /**
+   * external id for assume role request: {@value}.
+   */
+  public static final String ASSUMED_ROLE_EXTERNAL_ID = "fs.s3a.assumed.role.external.id";
+
+  /**
    * Session name for the assumed role, must be valid characters according
    * to the AWS APIs: {@value}.
    * If not set, one is generated from the current Hadoop/Kerberos username.
@@ -392,6 +397,21 @@ public final class Constants {
    */
   public static final Duration DEFAULT_CONNECTION_ACQUISITION_TIMEOUT_DURATION =
       Duration.ofSeconds(60);
+
+  /**
+   * Timeout for uploading all of a small object or a single part
+   * of a larger one.
+   * {@value}.
+   * Default unit is milliseconds for consistency with other options.
+   */
+  public static final String PART_UPLOAD_TIMEOUT =
+      "fs.s3a.connection.part.upload.timeout";
+
+  /**
+   * Default part upload timeout: 15 minutes.
+   */
+  public static final Duration DEFAULT_PART_UPLOAD_TIMEOUT =
+      Duration.ofMinutes(15);
 
   /**
    * Should TCP Keepalive be enabled on the socket?
@@ -735,6 +755,16 @@ public final class Constants {
    */
   public static final String S3_ENCRYPTION_KEY =
       "fs.s3a.encryption.key";
+
+  /**
+   * Set S3-SSE encryption context.
+   * The value of this property is a set of non-secret comma-separated key-value pairs
+   * of additional contextual information about the data that are separated by equal
+   * operator (=).
+   * value:{@value}
+   */
+  public static final String S3_ENCRYPTION_CONTEXT =
+      "fs.s3a.encryption.context";
 
   /**
    * List of custom Signers. The signer class will be loaded, and the signer
@@ -1114,6 +1144,22 @@ public final class Constants {
    */
   public static final String RETRY_THROTTLE_INTERVAL_DEFAULT = "500ms";
 
+
+  /**
+   * Should S3A connector retry on all 5xx errors which don't have
+   * explicit support: {@value}?
+   * <p>
+   * This is in addition to any retries the AWS SDK itself does, which
+   * is known to retry on many of these (e.g. 500).
+   */
+  public static final String RETRY_HTTP_5XX_ERRORS =
+      "fs.s3a.retry.http.5xx.errors";
+
+  /**
+   * Default value for {@link #RETRY_HTTP_5XX_ERRORS}: {@value}.
+   */
+  public static final boolean DEFAULT_RETRY_HTTP_5XX_ERRORS = true;
+
   /**
    * Should etags be exposed as checksums?
    */
@@ -1342,6 +1388,19 @@ public final class Constants {
   public static final String XA_HEADER_PREFIX = "header.";
 
   /**
+   * S3 cross region access enabled ?
+   * Value: {@value}.
+   */
+
+  public static final String AWS_S3_CROSS_REGION_ACCESS_ENABLED =
+      "fs.s3a.cross.region.access.enabled";
+  /**
+   * Default value for S3 cross region access enabled: {@value}.
+   */
+  public static final boolean AWS_S3_CROSS_REGION_ACCESS_ENABLED_DEFAULT = true;
+
+
+  /**
    * AWS S3 region for the bucket. When set bypasses the construction of
    * region through endpoint url.
    */
@@ -1394,6 +1453,11 @@ public final class Constants {
   public static final String FS_S3A_CREATE_PERFORMANCE_ENABLED =
       FS_S3A_CREATE_PERFORMANCE + ".enabled";
 
+  /**
+   * Comma separated list of performance flags.
+   */
+  public static final String FS_S3A_PERFORMANCE_FLAGS =
+      "fs.s3a.performance.flags";
   /**
    * Prefix for adding a header to the object when created.
    * The actual value must have a "." suffix and then the actual header.
